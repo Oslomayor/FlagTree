@@ -470,6 +470,19 @@ def _rewrite_llvm_scmp_ucmp_to_icmp(ir_text: str) -> str:
     return out
 
 
+def _get_unsupported_attrs(llc_major: Optional[int]) -> tuple[str, ...]:
+    if llc_major is not None and llc_major >= 20:
+        return ("nocreateundeforpoison", )
+    return ("nocallback", "nocreateundeforpoison", "mustprogress", "speculatable", "willreturn")
+
+
+def _drop_unsupported_attrs(ir_text: str, llc_major: Optional[int]) -> str:
+    out = ir_text
+    for attr in _get_unsupported_attrs(llc_major):
+        out = re.sub(rf"(?<![A-Za-z0-9_.]){attr}(?![A-Za-z0-9_.])", "", out)
+    return out
+
+
 def _llvm_compat(ir_text: str) -> str:
     replacements = [
         ("memory\\(none\\)", "readnone"),
@@ -524,8 +537,6 @@ def _llvm_compat(ir_text: str) -> str:
     out = _rewrite_musa_ptr_gen_to_addrspace(out)
     out = _rewrite_llvm_is_fpclass_f32(out)
     out = _rewrite_lifetime_intrinsics_for_llvm14(out)
-    for attr in ("nocallback", "nocreateundeforpoison", "mustprogress", "speculatable", "willreturn"):
-        out = re.sub(rf"(?<![A-Za-z0-9_.]){attr}(?![A-Za-z0-9_.])", "", out)
     out = re.sub(r"\bmemory\([^)]*\)", "", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
     return out
@@ -884,6 +895,7 @@ class MUSABackend(BaseBackend):
         ir_text = src
         llc_major = _detect_llvm_major_version(llc_path)
         if opt.enable_llvm_compat:
+            ir_text = _drop_unsupported_attrs(ir_text, llc_major)
             if _should_apply_llvm_compat(llc_major):
                 ir_text = _llvm_compat(ir_text)
         ir_text = _rewrite_llvm_scmp_ucmp_to_icmp(ir_text)
