@@ -727,11 +727,15 @@ class MUSABackend(BaseBackend):
         mthreads.load_dialects(ctx)
 
     @staticmethod
-    def make_ttir(mod, metadata, opt):
+    def make_ttir(mod, metadata, opt, capability):
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
         passes.common.add_inliner(pm)
         passes.ttir.add_rewrite_tensor_pointer(pm)
+        # MUSA supports TME from capability 31 (PH1), so we only need to
+        # rewrite tensor descriptor to pointer for older architectures
+        if capability < 31:
+            passes.ttir.add_rewrite_tensor_descriptor_to_pointer(pm)
         passes.common.add_canonicalizer(pm)
         passes.ttir.add_combine(pm)
         passes.ttir.add_reorder_broadcast(pm)
@@ -972,7 +976,7 @@ class MUSABackend(BaseBackend):
         arch = options.arch
         capability = _capability_from_arch(arch)
         if language == Language.TRITON:
-            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)
+            stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options, capability)
             stages["ttgir"] = lambda src, metadata: self.make_ttgir(src, metadata, options, arch, capability)
         elif language == Language.GLUON:
             raise RuntimeError("MUSA backend does not support GLUON yet")
