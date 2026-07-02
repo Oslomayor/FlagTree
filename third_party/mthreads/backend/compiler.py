@@ -94,6 +94,10 @@ def _capability_from_arch(arch: object) -> int:
     raise ValueError(f"Unsupported MUSA arch: {arch}")
 
 
+def _warp_size_from_capability(capability: int) -> int:
+    return 128 if capability < 30 else 32
+
+
 def _max_static_shared_memory_from_arch(arch: object) -> Optional[int]:
     capability = _capability_from_arch(arch)
     if capability == 31:
@@ -707,8 +711,7 @@ class MUSABackend(BaseBackend):
             args["enable_llvm_compat"] = knobs.musa.enable_llvm_compat
         args.update({k: opts[k] for k in MUSAOptions.__dataclass_fields__.keys() if k in opts and opts[k] is not None})
         if "warp_size" not in args:
-            target_warp_size = getattr(self.target, "warp_size", None)
-            args["warp_size"] = int(target_warp_size) if target_warp_size else 32
+            args["warp_size"] = _warp_size_from_capability(capability)
         return MUSAOptions(**args)
 
     def pack_metadata(self, metadata):

@@ -14,6 +14,22 @@ dirname = os.path.dirname(os.path.realpath(__file__))
 _TENSORDESC_CACHE_LIMIT = 1024
 
 
+def _arch_to_musa_capability(arch):
+    if isinstance(arch, int):
+        return arch
+    arch = str(arch).lower()
+    if arch.isdigit():
+        return int(arch)
+    if arch.startswith("ph1"):
+        return 31
+    return None
+
+
+def _warp_size_for_musa_arch(arch):
+    capability = _arch_to_musa_capability(arch)
+    return 128 if capability is not None and capability < 30 else 32
+
+
 def _split_paths(value: str):
     return [p for p in value.split(":") if p]
 
@@ -917,8 +933,11 @@ class MusaDriver(DriverBase):
         return ty_to_cpp(ty)
 
     def get_current_target(self):
-        arch = knobs.runtime.override_arch or os.getenv("TRITON_MUSA_ARCH") or "ph1"
-        warp_size = 32
+        arch = knobs.runtime.override_arch or os.getenv("TRITON_MUSA_ARCH")
+        if arch is None:
+            capability = self._torch.musa.get_device_capability(self.get_current_device())
+            arch = int(capability[0]) * 10 + int(capability[1])
+        warp_size = _warp_size_for_musa_arch(arch)
         return GPUTarget("musa", arch, warp_size)
 
     def get_active_torch_device(self):
