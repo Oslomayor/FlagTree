@@ -621,6 +621,7 @@ class MUSAOptions:
     supports_noinline: bool = True
     arch: Optional[str] = None
     instrumentation_mode: str = ""
+    inplace_alias_pairs: str = ""
 
     def __post_init__(self):
         default_libdir = Path(__file__).parent / "lib"
@@ -633,6 +634,8 @@ class MUSAOptions:
 
     def hash(self):
         hash_dict = dict(self.__dict__)
+        if not hash_dict.get("inplace_alias_pairs"):
+            hash_dict.pop("inplace_alias_pairs", None)
         llc_path, lld_path, llc_asm_path = _resolve_toolchain_paths(self)
         hash_dict["effective_llc_path"] = llc_path
         hash_dict["effective_lld_path"] = lld_path
@@ -818,7 +821,7 @@ class MUSABackend(BaseBackend):
         passes.common.add_cse(pm)
         passes.common.add_canonicalizer(pm)
         if capability == 31:
-            mthreads.passes.ttgpuir.add_mark_inplace_loads(pm)
+            mthreads.passes.ttgpuir.add_mark_inplace_loads(pm, opt.inplace_alias_pairs)
         mthreads.passes.ttgpuir.add_finalize_barriers(pm)
         pm.run(mod, "make_ttgir")
         metadata["uses_sqmma"] = _module_uses_sqmma(mod)
