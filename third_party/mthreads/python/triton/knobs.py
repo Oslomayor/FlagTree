@@ -243,6 +243,9 @@ class MUSATool:
         return MUSATool(str(resolved), version)
 
 
+_DEFAULT_MUSA_PREFIX = "/usr/local/musa"
+
+
 class env_musa_tool(env_base[str, MUSATool]):
 
     def __init__(self, key: str, binary: str) -> None:
@@ -254,20 +257,7 @@ class env_musa_tool(env_base[str, MUSATool]):
         if path:
             candidates.append(path)
 
-        toolchain_path = getenv("TRITON_MUSA_TOOLCHAIN_PATH")
-        if toolchain_path:
-            candidates.append(os.path.join(toolchain_path, self.binary))
-
-        mtcc_bin_path = getenv("MTCC_BIN_PATH")
-        if mtcc_bin_path:
-            candidates.append(os.path.join(mtcc_bin_path, self.binary))
-
-        musa_home = getenv("MUSA_HOME") or getenv("MUSA_ROOT")
-        if musa_home:
-            candidates.append(os.path.join(musa_home, "bin", self.binary))
-
-        if which := shutil.which(self.binary):
-            candidates.append(which)
+        candidates.append(os.path.join(_DEFAULT_MUSA_PREFIX, "bin", self.binary))
 
         return candidates
 
@@ -589,7 +579,6 @@ class amd_knobs(base_knobs):
 
 
 class musa_knobs(base_knobs):
-    toolchain_path: env_opt_str = env_opt_str("TRITON_MUSA_TOOLCHAIN_PATH")
     llc_path: env_opt_str = env_opt_str("TRITON_MUSA_LLC_PATH")
     lld_path: env_opt_str = env_opt_str("TRITON_MUSA_LLD_PATH")
     llc_asm_path: env_opt_str = env_opt_str("TRITON_MUSA_LLC_ASM_PATH")

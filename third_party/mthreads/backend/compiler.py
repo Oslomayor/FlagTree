@@ -15,6 +15,8 @@ import shlex
 import subprocess
 import tempfile
 
+_DEFAULT_MUSA_PREFIX = "/usr/local/musa"
+
 
 def min_dot_size(target: GPUTarget):
 
@@ -129,6 +131,14 @@ def _maybe_tool_path(tool) -> Optional[str]:
         return None
 
 
+def _validated_tool_path(path: Optional[str]) -> Optional[str]:
+    path = _normalize_path(path)
+    if not path:
+        return None
+    tool = knobs.MUSATool.from_path(path)
+    return _normalize_path(tool.path) if tool else None
+
+
 def _local_backend_bin_dir() -> Optional[Path]:
     bin_dir = Path(__file__).resolve().parent / "bin"
     return bin_dir if bin_dir.is_dir() else None
@@ -146,31 +156,21 @@ def _select_tool_path(binary: str, explicit_path: Optional[str], tool_getter) ->
     local_path = _local_backend_tool_path(binary)
     if local_path:
         return local_path
-    path = _normalize_path(explicit_path)
+    path = _validated_tool_path(explicit_path)
     if path:
         return path
     return _maybe_tool_path(tool_getter())
 
 
 def _resolve_toolchain_paths(options: "MUSAOptions") -> Tuple[str, str, Optional[str]]:
-    toolchain_path = _normalize_path(options.toolchain_path)
     llc_path = _normalize_path(options.llc_path)
     lld_path = _normalize_path(options.lld_path)
     llc_asm_path = _normalize_path(options.llc_asm_path)
 
-    if not toolchain_path:
-        mtcc_bin_path = os.getenv("MTCC_BIN_PATH")
-        if mtcc_bin_path:
-            toolchain_path = str(Path(mtcc_bin_path).expanduser())
-    if not toolchain_path:
-        musa_home = os.getenv("MUSA_HOME")
-        if musa_home:
-            toolchain_path = str(Path(musa_home).expanduser() / "bin")
-
-    if not llc_path and toolchain_path:
-        llc_path = str(Path(toolchain_path) / "llc")
-    if not lld_path and toolchain_path:
-        lld_path = str(Path(toolchain_path) / "ld.lld")
+    if not llc_path:
+        llc_path = str(Path(_DEFAULT_MUSA_PREFIX) / "bin" / "llc")
+    if not lld_path:
+        lld_path = str(Path(_DEFAULT_MUSA_PREFIX) / "bin" / "ld.lld")
 
     return llc_path or "", lld_path or "", llc_asm_path
 
@@ -567,10 +567,10 @@ def _llc_extra_options(metadata: Dict[str, object], options: "MUSAOptions") -> l
     enable_backend_opt = bool(options.enable_llc_opt or options.enable_backend_opt)
     llc_options_map = {
         (False, False): [*const_calc_opt],
-        (True, False): {
+        (True, False): [
             *const_calc_opt,
             "-mtgpu-alloc-shared-memory-from-zero=1",
-        },
+        ],
         (False, True): [
             "-mtgpu-enable-const-calc=1",
             "-mtgpu-tiny-offset-hint=1",
@@ -584,7 +584,7 @@ def _llc_extra_options(metadata: Dict[str, object], options: "MUSAOptions") -> l
             "-misched=mtgpu-max-ilp",
         ],
     }
-    opts = llc_options_map[(uses_sqmma, enable_backend_opt)]
+    opts = list(llc_options_map[(uses_sqmma, enable_backend_opt)])
     if options.llc_options:
         opts.extend(shlex.split(options.llc_options))
     return opts
@@ -607,7 +607,6 @@ class MUSAOptions:
     allowed_dot_input_precisions: Tuple[str, ...] = ("ieee", "tf32", "tf32x3", "bf16x3", "bf16x6")
     max_num_imprecise_acc_default: int = 0
     sanitize_overflow: bool = True
-    toolchain_path: Optional[str] = None
     llc_path: Optional[str] = None
     lld_path: Optional[str] = None
     llc_asm_path: Optional[str] = None
@@ -685,16 +684,6 @@ class MUSABackend(BaseBackend):
             args["custom_fp8_dtypes"] = tuple(sorted(custom_fp8_dtypes))
         if "deprecated_fp8_dot_operand_dtypes" not in opts:
             args["deprecated_fp8_dot_operand_dtypes"] = ()
-        if "toolchain_path" not in opts:
-            toolchain_path = knobs.musa.toolchain_path
-            if not toolchain_path:
-                mtcc_bin_path = os.getenv("MTCC_BIN_PATH")
-                if mtcc_bin_path:
-                    toolchain_path = mtcc_bin_path
-                else:
-                    musa_home = os.getenv("MUSA_HOME")
-                    toolchain_path = str(Path(musa_home) / "bin") if musa_home else None
-            args["toolchain_path"] = _normalize_path(toolchain_path)
         if "llc_path" not in opts:
             args["llc_path"] = _select_tool_path("llc", knobs.musa.llc_path, lambda: knobs.musa.llc)
         if "lld_path" not in opts:
@@ -892,8 +881,8 @@ class MUSABackend(BaseBackend):
 
         llc_path, lld_path, llc_asm_path = _resolve_toolchain_paths(opt)
         if not llc_path or not lld_path:
-            raise RuntimeError("MUSA toolchain not configured. Set TRITON_MUSA_TOOLCHAIN_PATH "
-                               "or TRITON_MUSA_LLC_PATH/TRITON_MUSA_LLD_PATH (or MUSA_HOME).")
+            raise RuntimeError("MUSA toolchain not configured. Set TRITON_MUSA_LLC_PATH/TRITON_MUSA_LLD_PATH "
+                               f"(default {_DEFAULT_MUSA_PREFIX}).")
 
         ir_text = src
         llc_major = _detect_llvm_major_version(llc_path)
