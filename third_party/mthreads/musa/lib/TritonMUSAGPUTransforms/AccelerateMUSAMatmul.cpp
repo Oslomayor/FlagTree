@@ -492,11 +492,12 @@ static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
       continue;
     }
     if (auto transOp = arg.getDefiningOp<tt::TransOp>()) {
-      if (allowTranspose ||
-          transOp.getSrc().getDefiningOp<tt::DescriptorLoadOp>())
-        break;
-      arg = transOp.getSrc();
-      continue;
+      // Keep the logical transposed tensor shape even when the selected SQMMA
+      // operand contract does not allow the hardware path to consume a
+      // transpose marker. In that case the staging below still forces the
+      // canonical no-transpose shared order, but LocalAllocOp must store the
+      // already-transposed logical tensor, not the original source tensor.
+      break;
     }
     break;
   }
