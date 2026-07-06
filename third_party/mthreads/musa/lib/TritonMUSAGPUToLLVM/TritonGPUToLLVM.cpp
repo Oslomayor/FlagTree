@@ -290,30 +290,6 @@ static LogicalResult lowerPredicatedLoadStoreCalls(ModuleOp mod,
   return success();
 }
 
-class CancelRedundantBFloatRoundTripPattern
-    : public OpRewritePattern<LLVM::CallIntrinsicOp> {
-public:
-  using OpRewritePattern<LLVM::CallIntrinsicOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(LLVM::CallIntrinsicOp call,
-                                PatternRewriter &rewriter) const override {
-    if (call.getIntrin() != "llvm.musa.bfloat162float")
-      return failure();
-    if (call.getArgs().size() != 1)
-      return failure();
-
-    auto producer = call.getArgs()[0].getDefiningOp<LLVM::CallIntrinsicOp>();
-    if (!producer || producer.getIntrin() != "llvm.musa.float2bfloat16")
-      return failure();
-    if (producer.getArgs().size() != 1 || !producer->hasOneUse())
-      return failure();
-
-    rewriter.replaceOp(call, producer.getArgs()[0]);
-    rewriter.eraseOp(producer);
-    return success();
-  }
-};
-
 std::optional<int64_t>
 inferElemBytesFromMemDesc(triton::gpu::MemDescType type) {
   int bitWidth = type.getElementTypeBitWidth();
@@ -479,11 +455,6 @@ struct ConvertTritonMUSAGPUToLLVM
 
     TritonLLVMConversionTarget convTarget(*context);
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns))))
-      return signalPassFailure();
-
-    RewritePatternSet cleanupPatterns(context);
-    cleanupPatterns.add<CancelRedundantBFloatRoundTripPattern>(context);
-    if (failed(applyPatternsGreedily(mod, std::move(cleanupPatterns))))
       return signalPassFailure();
 
     if (failed(lowerPredicatedLoadStoreCalls(mod, computeCapability)))
