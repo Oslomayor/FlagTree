@@ -2,6 +2,7 @@
 #include "TritonMUSACommon/BarrierUtils.h"
 #include "TritonMUSACommon/MMAContractUtils.h"
 #include "TritonMUSACommon/MMAEncodingUtils.h"
+#include "TritonMUSACommon/MMAOperandUtils.h"
 #include "TritonMUSACommon/TMEUtils.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/OpImplementation.h"
@@ -98,6 +99,36 @@ static LogicalResult verifyDotShapeContract(Operation *op,
   }
   if (cShape != dShape)
     return op->emitError("expected result shape to match accumulator shape");
+  return success();
+}
+
+static LogicalResult verifySqmmaMemDescOperandContract(SquadDotOp op,
+                                                       Value operand,
+                                                       unsigned operandIdx) {
+  auto memDescTy = dyn_cast<ttg::MemDescType>(operand.getType());
+  if (!memDescTy)
+    return success();
+
+  auto contract = recoverSqmmaProducerContractFromMemDesc(operand);
+  if (failed(contract))
+    return op.emitError("SQMMA operand ")
+           << (operandIdx == 0 ? "A" : "B")
+           << " requires a unique consistent producer contract";
+
+  if (!*contract)
+    return success();
+
+  if ((*contract)->sqmmaOpIdx != static_cast<int64_t>(operandIdx))
+    return op.emitError("SQMMA operand ")
+           << (operandIdx == 0 ? "A" : "B")
+           << " producer sqmma.op_idx must match the operand index";
+
+  auto elemBytes = inferElemBytesFromMemDesc(memDescTy);
+  if (!elemBytes || *elemBytes != (*contract)->elemBytes)
+    return op.emitError("SQMMA operand ")
+           << (operandIdx == 0 ? "A" : "B")
+           << " producer sqmma.elem_bytes must match the memdesc element type";
+
   return success();
 }
 
@@ -230,6 +261,9 @@ LogicalResult SquadDotOp::verify() {
   if (interface->inferDotOpEncoding(aEncoding, 0, retEnc, getLoc()).failed())
     return failure();
   if (interface->inferDotOpEncoding(bEncoding, 1, retEnc, getLoc()).failed())
+    return failure();
+  if (failed(verifySqmmaMemDescOperandContract(*this, getA(), 0)) ||
+      failed(verifySqmmaMemDescOperandContract(*this, getB(), 1)))
     return failure();
   if (failed(verifyDotShapeContract(getOperation(), aTy.getShape(),
                                     bTy.getShape(), accTy.getShape(),
