@@ -1,6 +1,8 @@
 #include "Dialect/MUSA/IR/Dialect.h"
 #include "TritonMUSACommon/MMAOperandUtils.h"
+#include "TritonMUSACommon/MemDescUtils.h"
 #include "TritonMUSACommon/SqmmaAttrUtils.h"
+#include "TritonMUSACommon/SqmmaOperandPlan.h"
 #include "TritonMUSAGPUTransforms/Passes.h"
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/Pass/PassManager.h"
@@ -41,23 +43,32 @@ static bool isDescriptorTensorViewChain(Value value) {
   return false;
 }
 
-static SmallVector<int64_t>
-invertTrailingPermutation(ArrayRef<int64_t> allocShape,
-                          ArrayRef<int32_t> order) {
-  SmallVector<int64_t> result;
-  auto rank = static_cast<size_t>(order.size());
-  if (allocShape.size() < rank)
-    return result;
-  result.assign(allocShape.begin(), allocShape.end() - rank);
-
-  SmallVector<int64_t> tail(allocShape.end() - rank, allocShape.end());
-  SmallVector<int64_t> inverse(rank);
-  for (auto [idx, permutedIdx] : llvm::enumerate(order))
-    inverse[permutedIdx] = tail[idx];
-  result.append(inverse.begin(), inverse.end());
-  return result;
+static bool isSwizzledSharedMemDesc(ttg::MemDescType type) {
+  return isa_and_nonnull<ttg::SwizzledSharedEncodingAttr>(type.getEncoding());
 }
 
+static bool shouldNormalizeViewLocalAlloc(ttg::LocalAllocOp allocOp,
+                                          Value viewSource,
+                                          ttg::MemDescType sourceTy,
+                                          ttg::MemDescType finalViewTy) {
+  if (!triton::musa::hasSqmmaOpIdxAttr(allocOp.getOperation()) &&
+      !isDescriptorTensorViewChain(viewSource))
+    return false;
+
+  // Match NV's conservative reshape folding: do not lower a tensor view into a
+  // memdesc view when the inferred source carrier falls back to shared_linear
+  // but the final SQMMA operand is a swizzled shared tile. Reinterpreting that
+  // path would make the producer write linear shared memory and the SQMMA
+  // descriptor read it as swizzled memory.
+  if (isSwizzledSharedMemDesc(finalViewTy) &&
+      !isSwizzledSharedMemDesc(sourceTy))
+    return false;
+
+  return true;
+}
+
+// Keep the public dot-operand swizzle rewrite in the MUSA-local pass so MUSA
+// does not depend on the public NV-oriented pass entry point.
 static bool isDotLikeUserForSwizzle(Operation *op) {
   return isa<tt::DotOp, tt::musa::WmmaDotOp>(op);
 }
@@ -139,7 +150,6 @@ public:
 
     resetWmmaLayoutForMaterializedTranspose(cvtOp.getResult(),
                                             cvtOp->use_begin()->getOwner());
-
     rewriter.modifyOpInPlace(
         cvtOp, [&]() { cvtOp.getSrcMutable().assign(*localLoad); });
     return success();
@@ -172,8 +182,7 @@ public:
   }
 };
 
-class NormalizeDescriptorTransLocalAlloc
-    : public OpRewritePattern<ttg::LocalAllocOp> {
+class NormalizeViewLocalAlloc : public OpRewritePattern<ttg::LocalAllocOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
 
@@ -181,91 +190,103 @@ public:
                                 PatternRewriter &rewriter) const override {
     if (!allocOp.getSrc())
       return failure();
-    auto transOp = allocOp.getSrc().getDefiningOp<tt::TransOp>();
-    if (!transOp || !isDescriptorTensorViewChain(transOp.getSrc()))
-      return failure();
 
     auto allocTy = dyn_cast<ttg::MemDescType>(allocOp.getType());
-    auto srcTy = dyn_cast<RankedTensorType>(transOp.getSrc().getType());
-    if (!allocTy || !srcTy || !allocTy.getEncoding())
+    if (!allocTy)
       return failure();
 
-    Dialect &dialect = allocTy.getEncoding().getDialect();
-    auto inferLayoutInterface =
-        dyn_cast<tt::DialectInferLayoutInterface>(&dialect);
-    if (!inferLayoutInterface)
-      return failure();
-
-    Attribute sourceEncoding;
-    if (failed(inferLayoutInterface->inferTransOpEncoding(
-            allocTy.getEncoding(), srcTy.getShape(), transOp.getOrder(),
-            sourceEncoding, allocOp.getLoc()))) {
-      return failure();
+    SmallVector<triton::musa::SqmmaTensorViewStep> reverseChain;
+    Value base = allocOp.getSrc();
+    while (Operation *defOp = base.getDefiningOp()) {
+      if (auto transOp = dyn_cast<tt::TransOp>(defOp)) {
+        reverseChain.push_back(
+            {triton::musa::SqmmaTensorViewKind::Trans, defOp});
+        base = transOp.getSrc();
+        continue;
+      }
+      if (auto reshapeOp = dyn_cast<tt::ReshapeOp>(defOp)) {
+        reverseChain.push_back(
+            {triton::musa::SqmmaTensorViewKind::Reshape, defOp});
+        base = reshapeOp.getSrc();
+        continue;
+      }
+      if (auto cvtOp = dyn_cast<ttg::ConvertLayoutOp>(defOp)) {
+        reverseChain.push_back(
+            {triton::musa::SqmmaTensorViewKind::ConvertLayout, defOp});
+        base = cvtOp.getSrc();
+        continue;
+      }
+      if (auto castOp = dyn_cast<UnrealizedConversionCastOp>(defOp)) {
+        if (castOp->getNumOperands() != 1 || castOp->getNumResults() != 1)
+          return failure();
+        reverseChain.push_back(
+            {triton::musa::SqmmaTensorViewKind::UnrealizedCast, defOp});
+        base = castOp->getOperand(0);
+        continue;
+      }
+      break;
     }
-
-    SmallVector<int64_t> sourceAllocShape =
-        invertTrailingPermutation(allocTy.getAllocShape(), transOp.getOrder());
-    if (sourceAllocShape.empty())
+    if (reverseChain.empty())
       return failure();
 
-    auto sourceTy = ttg::MemDescType::get(
-        srcTy.getShape(), srcTy.getElementType(), sourceEncoding,
-        allocTy.getMemorySpace(), allocTy.getMutableMemory(), sourceAllocShape);
+    SmallVector<triton::musa::SqmmaTensorViewStep> chain(reverseChain.rbegin(),
+                                                         reverseChain.rend());
+    auto sourceTy =
+        triton::musa::inferSqmmaOperandSourceMemDescType(chain, allocTy);
+    if (failed(sourceTy))
+      return failure();
+    if (!shouldNormalizeViewLocalAlloc(allocOp, base, *sourceTy, allocTy))
+      return failure();
 
-    auto newAlloc = ttg::LocalAllocOp::create(rewriter, allocOp.getLoc(),
-                                              sourceTy, transOp.getSrc());
+    auto simulatedFinalTy =
+        triton::musa::inferSqmmaOperandFinalMemDescType(chain, *sourceTy);
+    if (failed(simulatedFinalTy))
+      return failure();
+    if (*simulatedFinalTy != allocTy &&
+        !triton::musa::areMemDescTypesCompatible(*simulatedFinalTy, allocTy) &&
+        !triton::musa::areMemDescTypesLayoutEquivalent(*simulatedFinalTy,
+                                                       allocTy))
+      return failure();
+
+    auto newAlloc =
+        ttg::LocalAllocOp::create(rewriter, allocOp.getLoc(), *sourceTy, base);
+    SmallVector<Operation *> createdOps{newAlloc.getOperation()};
     triton::musa::copySqmmaAttrs(allocOp.getOperation(),
                                  newAlloc.getOperation());
 
-    Value transposed = ttg::MemDescTransOp::create(
-        rewriter, transOp.getLoc(), newAlloc, transOp.getOrder());
-    triton::musa::copySqmmaAttrs(allocOp.getOperation(),
-                                 transposed.getDefiningOp());
-    rewriter.replaceOp(allocOp, transposed);
-    return success();
-  }
-};
-
-class NormalizeDescriptorReshapeLocalAlloc
-    : public OpRewritePattern<ttg::LocalAllocOp> {
-public:
-  using OpRewritePattern::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(ttg::LocalAllocOp allocOp,
-                                PatternRewriter &rewriter) const override {
-    if (!allocOp.getSrc())
-      return failure();
-    auto reshapeOp = allocOp.getSrc().getDefiningOp<tt::ReshapeOp>();
-    if (!reshapeOp || !isDescriptorTensorViewChain(reshapeOp.getSrc()))
-      return failure();
-
-    auto allocTy = dyn_cast<ttg::MemDescType>(allocOp.getType());
-    auto srcTy = dyn_cast<RankedTensorType>(reshapeOp.getSrc().getType());
-    if (!allocTy || !srcTy)
-      return failure();
-
-    ttg::MemDescType sourceTy;
-    if (failed(ttg::MemDescReshapeOp::inferReturnTypes(
-            getContext(), allocOp.getLoc(), allocTy, srcTy.getShape(),
-            sourceTy))) {
-      return failure();
+    Value current = newAlloc;
+    for (const triton::musa::SqmmaTensorViewStep &step : chain) {
+      if (step.kind == triton::musa::SqmmaTensorViewKind::Trans) {
+        current = triton::musa::materializeTransformedMemDesc(
+            rewriter, cast<tt::TransOp>(step.op), current,
+            allocOp.getOperation());
+        createdOps.push_back(current.getDefiningOp());
+        continue;
+      }
+      if (step.kind == triton::musa::SqmmaTensorViewKind::Reshape) {
+        current = triton::musa::materializeReshapedMemDesc(
+            rewriter, cast<tt::ReshapeOp>(step.op), current,
+            allocOp.getOperation());
+        createdOps.push_back(current.getDefiningOp());
+        continue;
+      }
     }
 
-    auto newAlloc = ttg::LocalAllocOp::create(rewriter, allocOp.getLoc(),
-                                              sourceTy, reshapeOp.getSrc());
-    triton::musa::copySqmmaAttrs(allocOp.getOperation(),
-                                 newAlloc.getOperation());
-
-    Value reshaped = ttg::MemDescReshapeOp::create(
-        rewriter, reshapeOp.getLoc(), newAlloc, allocTy.getShape());
-    if (reshaped.getType() != allocOp.getType()) {
-      reshaped.getDefiningOp()->erase();
-      newAlloc.erase();
-      return failure();
+    if (current.getType() != allocTy) {
+      Value adapted = triton::musa::adaptMemDescValue(
+          rewriter, allocOp.getLoc(), current, allocTy, allocOp.getOperation());
+      if (adapted) {
+        current = adapted;
+      } else {
+        for (Operation *op : llvm::reverse(createdOps)) {
+          if (op && op->use_empty())
+            rewriter.eraseOp(op);
+        }
+        return failure();
+      }
     }
-    triton::musa::copySqmmaAttrs(allocOp.getOperation(),
-                                 reshaped.getDefiningOp());
-    rewriter.replaceOp(allocOp, reshaped);
+    tt::replaceUsesAndPropagateType(rewriter, allocOp, current);
+    rewriter.eraseOp(allocOp);
     return success();
   }
 };
@@ -285,9 +306,9 @@ struct TritonMUSAGPUOptimizeDotOperandsPass
       return signalPassFailure();
 
     RewritePatternSet patterns(context);
-    patterns.add<SwizzleShmemConvert, SwizzleShmemTrans,
-                 NormalizeDescriptorTransLocalAlloc,
-                 NormalizeDescriptorReshapeLocalAlloc>(context);
+    patterns
+        .add<SwizzleShmemConvert, SwizzleShmemTrans, NormalizeViewLocalAlloc>(
+            context);
     ttg::ConvertLayoutOp::getCanonicalizationPatterns(patterns, context);
     if (failed(applyPatternsGreedily(mod, std::move(patterns))))
       signalPassFailure();

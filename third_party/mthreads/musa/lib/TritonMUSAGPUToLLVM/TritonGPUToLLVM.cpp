@@ -4,10 +4,6 @@
 #include "TritonMUSAGPUToLLVM/Passes.h"
 #include "TritonMUSAGPUToLLVM/TargetInfo.h"
 #include "TritonMUSAGPUToLLVM/Utility.h"
-#ifdef __TLE__
-#include "Conversion/MUSATLEToLLVM/LocalPointersOpToLLVM.h"
-#include "Dialect/MUSATLE/IR/Dialect.h"
-#endif
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/GPUToMTVM/GPUToMTVMPass.h"
@@ -126,11 +122,9 @@ public:
     addIllegalDialect<triton::nvidia_gpu::TritonNvidiaGPUDialect>();
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addIllegalDialect<triton::musa::MUSADialect>();
-#ifdef __TLE__
-    addIllegalDialect<triton::musa_tle::MUSATLEDialect>();
-#endif
     addLegalOp<mlir::UnrealizedConversionCastOp>();
 
+    // Warp specialization is lowered elsewhere (unsupported for now).
     addLegalOp<triton::gpu::WarpSpecializeOp>();
     addLegalOp<triton::gpu::WarpYieldOp>();
     addLegalOp<triton::gpu::WarpSpecializePartitionsOp>();
@@ -308,6 +302,51 @@ bool inferRowMajorFromMemDesc(triton::gpu::MemDescType type) {
 unsigned getSqmmaSwizzleAlignment(ModuleOp mod) {
   // Shared memory alignment should satisfy all SQMMA swizzle requirements.
   unsigned maxAlignment = 256;
+
+  auto updateFromContract =
+      [&](triton::musa::RecoveredSqmmaConsumerContract contract) {
+        int64_t opIdx = contract.sqmmaOpIdx;
+        bool isMNMajor = ((opIdx == 0) && !contract.rowMajor) ||
+                         ((opIdx == 1) && contract.rowMajor);
+        unsigned sg = 16;
+        if (contract.elemBytes == 2)
+          sg = isMNMajor ? 32 : 16;
+        else if (contract.elemBytes == 4)
+          sg = isMNMajor ? 64 : 16;
+
+        unsigned alignment = 256 * (256 / sg);
+        maxAlignment = std::max(maxAlignment, alignment);
+      };
+
+  auto visitDotOperand = [&](Operation *op, Value operand,
+                             unsigned operandIdx) {
+    auto memDescTy = dyn_cast<triton::gpu::MemDescType>(operand.getType());
+    if (!memDescTy)
+      return;
+
+    auto producerContract =
+        triton::musa::recoverSqmmaProducerContractFromMemDesc(operand);
+    auto expectedContract = triton::musa::getExpectedSqmmaOperandContract(
+        op, operandIdx, memDescTy);
+    if (failed(producerContract) && failed(expectedContract))
+      return;
+    if (succeeded(producerContract) && *producerContract) {
+      updateFromContract(**producerContract);
+      return;
+    }
+    if (succeeded(expectedContract))
+      updateFromContract(*expectedContract);
+  };
+
+  mod.walk([&](triton::musa::SquadDotOp op) {
+    visitDotOperand(op.getOperation(), op.getA(), 0);
+    visitDotOperand(op.getOperation(), op.getB(), 1);
+  });
+  mod.walk([&](triton::mtgpu::SqmmaOp op) {
+    visitDotOperand(op.getOperation(), op.getA(), 0);
+    visitDotOperand(op.getOperation(), op.getB(), 1);
+  });
+
   mod.walk([&](triton::gpu::LocalAllocOp localAllocOp) {
     auto maybeOpIdx = triton::musa::getSqmmaOpIdx(localAllocOp.getOperation());
     if (!maybeOpIdx)
@@ -323,18 +362,8 @@ unsigned getSqmmaSwizzleAlignment(ModuleOp mod) {
 
     bool isRowMajor = triton::musa::getSqmmaRowMajor(
         localAllocOp.getOperation(), inferRowMajorFromMemDesc(memDescTy));
-
-    int64_t opIdx = *maybeOpIdx;
-    bool isMNMajor =
-        ((opIdx == 0) && !isRowMajor) || ((opIdx == 1) && isRowMajor);
-    unsigned sg = 16;
-    if (*maybeElemBytes == 2)
-      sg = isMNMajor ? 32 : 16;
-    else if (*maybeElemBytes == 4)
-      sg = isMNMajor ? 64 : 16;
-
-    unsigned alignment = 256 * (256 / sg);
-    maxAlignment = std::max(maxAlignment, alignment);
+    updateFromContract(triton::musa::RecoveredSqmmaConsumerContract{
+        *maybeOpIdx, *maybeElemBytes, isRowMajor});
   });
   return maxAlignment;
 }
@@ -381,6 +410,7 @@ struct ConvertTritonMUSAGPUToLLVM
           return info->carrierType;
         });
 
+    // Lower function signatures and calls first.
     TritonLLVMFunctionConversionTarget funcTarget(*context);
     RewritePatternSet funcPatterns(context);
     mlir::triton::populateFuncOpConversionPattern(
@@ -394,10 +424,6 @@ struct ConvertTritonMUSAGPUToLLVM
 
     RewritePatternSet patterns(context);
     int benefit = patternBenefitPrioritizeOverLLVMConversions;
-#ifdef __TLE__
-    mlir::triton::musa_tle::populateMUSATLEToLLVMPatterns(
-        typeConverter, targetInfo, patterns, benefit);
-#endif
     mlir::triton::MUSA::populateConvertLayoutOpToLLVMPatterns(
         typeConverter, targetInfo, patterns, benefit);
     mlir::triton::MUSA::populateDotOpToLLVMPatterns(typeConverter, patterns,
@@ -457,6 +483,9 @@ struct ConvertTritonMUSAGPUToLLVM
     if (failed(applyPartialConversion(mod, convTarget, std::move(patterns))))
       return signalPassFailure();
 
+    // Lower predicated load/store helpers to LLVM control flow. This is a
+    // CFG-splitting rewrite, so keep it deterministic instead of running it
+    // through the greedy pattern driver over the whole module.
     if (failed(lowerPredicatedLoadStoreCalls(mod, computeCapability)))
       return signalPassFailure();
 

@@ -105,31 +105,8 @@ static LogicalResult verifyDotShapeContract(Operation *op,
 static LogicalResult verifySqmmaMemDescOperandContract(SquadDotOp op,
                                                        Value operand,
                                                        unsigned operandIdx) {
-  auto memDescTy = dyn_cast<ttg::MemDescType>(operand.getType());
-  if (!memDescTy)
-    return success();
-
-  auto contract = recoverSqmmaProducerContractFromMemDesc(operand);
-  if (failed(contract))
-    return op.emitError("SQMMA operand ")
-           << (operandIdx == 0 ? "A" : "B")
-           << " requires a unique consistent producer contract";
-
-  if (!*contract)
-    return success();
-
-  if ((*contract)->sqmmaOpIdx != static_cast<int64_t>(operandIdx))
-    return op.emitError("SQMMA operand ")
-           << (operandIdx == 0 ? "A" : "B")
-           << " producer sqmma.op_idx must match the operand index";
-
-  auto elemBytes = inferElemBytesFromMemDesc(memDescTy);
-  if (!elemBytes || *elemBytes != (*contract)->elemBytes)
-    return op.emitError("SQMMA operand ")
-           << (operandIdx == 0 ? "A" : "B")
-           << " producer sqmma.elem_bytes must match the memdesc element type";
-
-  return success();
+  return verifySqmmaMemDescOperandProducerContract(op.getOperation(), operand,
+                                                   operandIdx);
 }
 
 static bool isFP8Type(Type type) {

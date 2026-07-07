@@ -156,6 +156,8 @@ static LogicalResult createMUSATMEStoreAsyncCopy(const TMEStore &store,
 
   Value pred = arith::ConstantIntOp::create(builder, loc, 1, 1);
 
+  // Keep the store path truly async by waiting only before reusing the shared
+  // buffer, matching the public pipelined TMA-store structure.
   triton::musa::TMEStoreReadWaitOp::create(builder, loc);
   ttg::LocalStoreOp::create(builder, loc, store.src, alloc);
   triton::musa::createAsyncTMECopyLocalToGlobal(
@@ -167,6 +169,8 @@ static LogicalResult createMUSATMEStoreAsyncCopy(const TMEStore &store,
 }
 
 static void lowerTMADescriptorCreation(scf::ForOp forOp) {
+  // Mirror the public pipelined TMA-store path: use max_stage=3 to keep the
+  // device-side descriptor double-buffered independently from loop depth.
   tt::CoarseSchedule schedule(3);
   (void)mlir::triton::musa::pipeline::lowerTMADescriptors(forOp, schedule);
 }
@@ -177,7 +181,7 @@ scf::ForOp lowerTMADescriptors(scf::ForOp forOp, tt::CoarseSchedule &schedule) {
   llvm::MapVector<Operation *, Value> tmaBufferMapping;
   int maxStage = schedule.getNumStages() - 1;
   for (auto &op : forOp.getBody()->without_terminator()) {
-    if (isa<ttng::WarpGroupDotOp>(&op)) {
+    if (isa<ttng::WarpGroupDotOp, triton::musa::SquadDotOp>(&op)) {
       maxStage += 1;
       break;
     }

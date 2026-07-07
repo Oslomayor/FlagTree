@@ -38,7 +38,7 @@ static int getMusaComputeCapability(ModuleOp mod) {
   StringRef ref = targetAttr.strref();
   if (!ref.starts_with("musa:"))
     return -1;
-  StringRef arch = ref.drop_front(5);
+  StringRef arch = ref.drop_front(5); // drop "musa:"
   if (arch.starts_with("ph1"))
     return 31;
   int computeCapability = -1;
@@ -102,9 +102,11 @@ getWmmaCandidateInstrShapes(Type elemTy, bool allowTF32) {
     return {{16, 8, 4}, {16, 8, 8}, {16, 16, 16}};
   if (elemTy.isF16() || elemTy.isBF16()) {
     return {
+        // Keep PH1 WMMA candidate ordering aligned with 3.2 behavior.
         {8, 16, 16}, {16, 8, 8}, {16, 8, 16}, {16, 16, 16}, {16, 16, 32},
     };
   }
+  // INT8 / FP8 variants.
   return {
       {8, 16, 16}, {16, 8, 16}, {16, 16, 16}, {16, 16, 32}, {16, 16, 64},
   };
@@ -169,22 +171,17 @@ static bool isKnownBrokenSqmmaConfig(Type elemTy, bool allowTF32,
 }
 
 static SmallVector<unsigned, 2>
-selectWarpsPerCTAForPH1(unsigned m, unsigned n, unsigned numWarps,
-                        ArrayRef<unsigned> instrShape) {
+selectWmmaWarpsPerCTAForPH1(unsigned m, unsigned n, unsigned numWarps,
+                            ArrayRef<unsigned> instrShape) {
   assert(instrShape.size() == 3 && "Unexpected instrShape rank");
   SmallVector<unsigned, 2> ret{1, 1};
-  unsigned maxWarpsM = std::max(1u, m / instrShape[0]);
   while (ret[0] * ret[1] < numWarps) {
     bool growM =
         (m / instrShape[0] / ret[0]) >= (n / (instrShape[1] * 2) / ret[1]);
-    if (growM) {
-      if (ret[0] < maxWarpsM)
-        ret[0] *= 2;
-      else
-        ret[1] *= 2;
-    } else {
+    if (growM)
+      ret[0] *= 2;
+    else
       ret[1] *= 2;
-    }
   }
   return ret;
 }
@@ -237,6 +234,10 @@ static SqmmaAccumulationContract selectSqmmaAccumulationContract(
   unsigned numRepM = ceilDiv(m, tileM);
   unsigned numRepK = std::max(1u, ceilDiv(k, instK));
 
+  // When the accumulator is statically zero, hardware SQMMA can consume a
+  // zero C operand directly. Routing first-use FP8->F32 dots through the
+  // software accumulation family only adds an outer FAdd chain and hurts the
+  // small-tile path without preserving any extra semantics.
   bool softwareAccumulate =
       !accIsZero &&
       ((!contract.useCOperand) ||
@@ -267,27 +268,23 @@ selectWmmaConfig(unsigned m, unsigned n, unsigned k, unsigned numWarps,
   SmallVector<unsigned, 3> bestInstrShape = {0, 0, 0};
   unsigned bestInstCount = 0;
 
-  for (unsigned tileM = 1; tileM <= numWarps; tileM *= 2) {
-    if (numWarps % tileM)
+  // Pick a legal WMMA instruction shape for the full CTA, then form the warp
+  // layout from num_warps. This follows the NV MMA flow: admission is based on
+  // the instruction contract, and toLinearLayout(shape) trims any warp basis
+  // that over-covers a small logical dimension.
+  for (const auto &shape : candidates) {
+    if (!triton::musa::lookupWmmaIntrinsic(elemTy, shape))
       continue;
-    unsigned tileN = numWarps / tileM;
-    if (m % tileM != 0 || n % tileN != 0)
+    unsigned instM = shape[0];
+    unsigned instN = shape[1];
+    unsigned instK = shape[2];
+    if (m % instM != 0 || n % instN != 0 || k % instK != 0)
       continue;
-    unsigned warpM = m / tileM;
-    unsigned warpN = n / tileN;
-
-    for (const auto &shape : candidates) {
-      unsigned instM = shape[0];
-      unsigned instN = shape[1];
-      unsigned instK = shape[2];
-      if (warpM % instM != 0 || warpN % instN != 0 || k % instK != 0)
-        continue;
-      unsigned instCount = (warpM / instM) * (warpN / instN) * (k / instK);
-      if (!found || instCount < bestInstCount) {
-        bestInstCount = instCount;
-        bestInstrShape = shape;
-        found = true;
-      }
+    unsigned instCount = (m / instM) * (n / instN) * (k / instK);
+    if (!found || instCount < bestInstCount) {
+      bestInstCount = instCount;
+      bestInstrShape = shape;
+      found = true;
     }
   }
 
@@ -296,7 +293,8 @@ selectWmmaConfig(unsigned m, unsigned n, unsigned k, unsigned numWarps,
 
   SelectedConfig best;
   best.instrShape = bestInstrShape;
-  best.warpsPerCTA = selectWarpsPerCTAForPH1(m, n, numWarps, best.instrShape);
+  best.warpsPerCTA =
+      selectWmmaWarpsPerCTAForPH1(m, n, numWarps, best.instrShape);
   return best;
 }
 
@@ -327,10 +325,6 @@ static SmallVector<unsigned> getSqmmaCandidateK(Type elemTy, bool allowTF32) {
   if (tt::type::isFloat8(elemTy) || elemTy.isInteger(8))
     return {128, 64, 32};
   return {};
-}
-
-static bool shouldAllowSqmmaTranspose(Type elemTy) {
-  return elemTy.isF16() || elemTy.isBF16() || tt::type::isFloat8(elemTy);
 }
 
 enum class SqmmaTransLoadKind {
@@ -402,6 +396,7 @@ static void promoteResidualDotForFma(ModuleOp mod) {
     Type dElemTy = dTy.getElementType();
     OpBuilder builder(dotOp);
     Location loc = dotOp.getLoc();
+
     if (tt::type::isFloat8(aElemTy) || tt::type::isFloat8(bElemTy)) {
       if (aElemTy == dElemTy && bElemTy == dElemTy)
         continue;
@@ -481,6 +476,8 @@ static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
       auto dstTy = dyn_cast<RankedTensorType>(cvtOp.getType());
       if (srcTy && dstTy && isa<ttg::MmaEncodingTrait>(srcTy.getEncoding()) &&
           !isa<ttg::MmaEncodingTrait>(dstTy.getEncoding())) {
+        // Chained SQMMA operands must restage from a logical tensor boundary,
+        // not from a raw accumulator/fragment tensor.
         forceFreshRestage = true;
         break;
       }
@@ -509,6 +506,11 @@ static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
   int elemBitWidth = argType.getElementType().getIntOrFloatBitWidth();
   int elemBytes = std::max(1, (elemBitWidth + 7) / 8);
 
+  // Propagate SQMMA operand metadata to descriptor loads so downstream
+  // TME/lowering stages can infer swizzle choices without hard-coded paths.
+  // Descriptor paths may feed dot operands through bitcasts (e.g. i8->fp8
+  // reinterpret in legacy descriptor APIs). Walk through those wrappers so the
+  // source descriptor_load still carries SQMMA metadata for TME lowering.
   Value descSeed = arg;
   while (auto bitcastOp = descSeed.getDefiningOp<tt::BitcastOp>())
     descSeed = bitcastOp.getSrc();
@@ -521,75 +523,42 @@ static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
 
   SmallVector<unsigned> newOrder = ttg::getOrderForMemory(argType);
   if (!allowTranspose) {
+    // Keep the PH1 no-transpose contract aligned with the proven 3.2 SQMMA
+    // path: both operands stage into row-major shared tiles and let the SQMMA
+    // descriptor/layout logic carry the operand-role distinction. Explicit
+    // descriptor-fed tt.trans is preserved above so TMELowering can lower it
+    // via MemDescTransOp without losing the swapped tile shape.
     newOrder.clear();
     for (int dim = static_cast<int>(rank) - 1; dim >= 0; --dim)
       newOrder.push_back(static_cast<unsigned>(dim));
   }
   bool isRowMajor =
       !newOrder.empty() && (newOrder.front() + 1 == argType.getRank());
+  auto hasConflictingSqmmaAttrs = [&](Operation *targetOp) {
+    if (!targetOp || !triton::musa::hasSqmmaOpIdxAttr(targetOp))
+      return false;
+    auto existingOpIdx = triton::musa::getSqmmaOpIdx(targetOp);
+    auto existingElemBytes = triton::musa::getSqmmaElemBytes(targetOp);
+    if (!existingOpIdx || !existingElemBytes)
+      return true;
+    bool existingRowMajor =
+        triton::musa::getSqmmaRowMajor(targetOp, isRowMajor);
+    return *existingOpIdx != opIdx || *existingElemBytes != elemBytes ||
+           existingRowMajor != isRowMajor;
+  };
   auto setSqmmaAttrs = [&](Operation *targetOp) {
     triton::musa::setSqmmaAttrs(targetOp, opIdx, elemBytes, isRowMajor);
   };
-  auto propagateSqmmaAttrsFromLocalAlloc = [&](ttg::LocalAllocOp localAlloc) {
-    SmallVector<Value> pending{localAlloc.getResult()};
-    llvm::SmallPtrSet<Operation *, 16> visited;
-    while (!pending.empty()) {
-      Value cur = pending.pop_back_val();
-      for (Operation *user : cur.getUsers()) {
-        if (!visited.insert(user).second)
-          continue;
-        if (auto indexOp = dyn_cast<ttg::MemDescIndexOp>(user)) {
-          setSqmmaAttrs(indexOp.getOperation());
-          pending.push_back(indexOp.getResult());
-          continue;
-        }
-        if (auto subslice = dyn_cast<ttg::MemDescSubsliceOp>(user)) {
-          setSqmmaAttrs(subslice.getOperation());
-          pending.push_back(subslice.getResult());
-          continue;
-        }
-        if (auto reinterpretOp = dyn_cast<ttg::MemDescReinterpretOp>(user)) {
-          pending.push_back(reinterpretOp.getResult());
-          continue;
-        }
-        if (auto transOp = dyn_cast<ttg::MemDescTransOp>(user)) {
-          pending.push_back(transOp.getResult());
-          continue;
-        }
-      }
-    }
+  auto setSqmmaAttrsIfCompatible = [&](Operation *targetOp) {
+    if (hasConflictingSqmmaAttrs(targetOp))
+      return false;
+    setSqmmaAttrs(targetOp);
+    return true;
   };
   auto propagateSqmmaAttrsToMemDescChain = [&](Value memDesc) {
-    Value cur = memDesc;
-    while (cur) {
-      Operation *defOp = cur.getDefiningOp();
-      if (!defOp)
-        break;
-      if (auto localAlloc = dyn_cast<ttg::LocalAllocOp>(defOp)) {
-        setSqmmaAttrs(localAlloc.getOperation());
-        propagateSqmmaAttrsFromLocalAlloc(localAlloc);
-        break;
-      }
-      if (auto indexOp = dyn_cast<ttg::MemDescIndexOp>(defOp)) {
-        setSqmmaAttrs(indexOp.getOperation());
-        cur = indexOp.getSrc();
-        continue;
-      }
-      if (auto subslice = dyn_cast<ttg::MemDescSubsliceOp>(defOp)) {
-        setSqmmaAttrs(subslice.getOperation());
-        cur = subslice.getSrc();
-        continue;
-      }
-      if (auto reinterpretOp = dyn_cast<ttg::MemDescReinterpretOp>(defOp)) {
-        cur = reinterpretOp.getSrc();
-        continue;
-      }
-      if (auto transOp = dyn_cast<ttg::MemDescTransOp>(defOp)) {
-        cur = transOp.getSrc();
-        continue;
-      }
-      break;
-    }
+    if (Operation *defOp = memDesc.getDefiningOp())
+      return setSqmmaAttrsIfCompatible(defOp);
+    return true;
   };
   auto cgaLayout = ttg::getCGALayout(argType.getEncoding());
   auto sharedLayout = mmaEnc.composeSharedLayoutForOperand(
@@ -604,6 +573,10 @@ static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
                             sharedLayout, sharedMemorySpace,
                             /*mutableMemory=*/true, allocShape);
 
+  // Reuse a shared-memory source only when its physical layout already matches
+  // the canonical SQMMA operand memdesc. Otherwise materialize a new
+  // local_alloc so the memdesc type remains the single source of truth for
+  // lowering.
   if (!forceFreshRestage) {
     if (auto localLoad = arg.getDefiningOp<ttg::LocalLoadOp>()) {
       auto srcMemDescTy =
@@ -612,29 +585,42 @@ static Value getSharedMemorySqmmaOperand(Value v, PatternRewriter &rewriter,
         return triton::musa::areMemDescTypesLayoutEquivalent(srcTy, memDescTy);
       };
       if (srcMemDescTy && samePhysicalLayout(srcMemDescTy)) {
-        propagateSqmmaAttrsToMemDescChain(localLoad.getSrc());
-        if (srcMemDescTy == memDescTy)
-          return localLoad.getSrc();
+        if (srcMemDescTy == memDescTy) {
+          if (propagateSqmmaAttrsToMemDescChain(localLoad.getSrc()))
+            return localLoad.getSrc();
+          // A same-typed reinterpret would be folded away, so fall through and
+          // restage when the root already carries a different contract.
+        } else {
+          (void)propagateSqmmaAttrsToMemDescChain(localLoad.getSrc());
 
-        rewriter.setInsertionPointAfterValue(localLoad.getSrc());
-        Value adapted = ttg::MemDescReinterpretOp::create(
-            rewriter, localLoad.getLoc(), memDescTy, localLoad.getSrc());
-        setSqmmaAttrs(adapted.getDefiningOp());
-        return adapted;
+          rewriter.setInsertionPointAfterValue(localLoad.getSrc());
+          Value adapted = ttg::MemDescReinterpretOp::create(
+              rewriter, localLoad.getLoc(), memDescTy, localLoad.getSrc());
+          setSqmmaAttrs(adapted.getDefiningOp());
+          return adapted;
+        }
       }
     }
   }
   if (descLoad) {
-    setSqmmaAttrs(descLoad.getOperation());
+    setSqmmaAttrsIfCompatible(descLoad.getOperation());
+    // Seed an explicit shared memdesc target so descriptor encoding inference
+    // can recover the same canonical landing layout from direct local_alloc
+    // users.
   }
 
+  // Reuse existing local_alloc results seeded by the same operand to avoid
+  // duplicating shared-memory traffic when multiple dots consume it.
   Value reusedMemDesc =
       forceFreshRestage
           ? Value()
           : triton::musa::findReusableLocalAllocForSource(arg, memDescTy);
-  if (reusedMemDesc)
-    if (auto localAlloc = reusedMemDesc.getDefiningOp<ttg::LocalAllocOp>())
-      setSqmmaAttrs(localAlloc.getOperation());
+  if (reusedMemDesc) {
+    if (auto localAlloc = reusedMemDesc.getDefiningOp<ttg::LocalAllocOp>()) {
+      if (!setSqmmaAttrsIfCompatible(localAlloc.getOperation()))
+        reusedMemDesc = {};
+    }
+  }
 
   if (reusedMemDesc)
     return reusedMemDesc;
@@ -930,12 +916,8 @@ public:
 
     SqmmaTransLoadKind transLoadKindA = classifySqmmaTransLoad(dotOp.getA());
     SqmmaTransLoadKind transLoadKindB = classifySqmmaTransLoad(dotOp.getB());
-    bool allowTransposeA = transLoadKindA == SqmmaTransLoadKind::Descriptor ||
-                           (transLoadKindA == SqmmaTransLoadKind::PlainLoad &&
-                            shouldAllowSqmmaTranspose(aElemTy));
-    bool allowTransposeB = transLoadKindB == SqmmaTransLoadKind::Descriptor ||
-                           (transLoadKindB == SqmmaTransLoadKind::PlainLoad &&
-                            shouldAllowSqmmaTranspose(bElemTy));
+    bool allowTransposeA = transLoadKindA != SqmmaTransLoadKind::None;
+    bool allowTransposeB = transLoadKindB != SqmmaTransLoadKind::None;
     Value newA = getSharedMemorySqmmaOperand(dotOp.getA(), rewriter, 0, mmaEnc,
                                              allowTransposeA);
     Value newB = getSharedMemorySqmmaOperand(dotOp.getB(), rewriter, 1, mmaEnc,
@@ -992,6 +974,10 @@ struct TritonMUSAGPUAccelerateMatmulPass
     : impl::TritonMUSAGPUAccelerateMatmulBase<
           TritonMUSAGPUAccelerateMatmulPass> {
   using Base::Base;
+
+  void getDependentDialects(DialectRegistry &registry) const override {
+    registry.insert<triton::musa::MUSADialect>();
+  }
 
   void runOnOperation() override {
     ModuleOp mod = getOperation();
