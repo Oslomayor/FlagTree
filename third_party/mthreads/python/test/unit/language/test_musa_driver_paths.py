@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from triton.backends.musa import driver as musa_driver
+from triton.backends.mthreads import driver as musa_driver
 
 
 def _clear_musa_driver_path_caches():

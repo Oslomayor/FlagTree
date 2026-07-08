@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from triton.backends.compiler import GPUTarget
-from triton.backends.musa import compiler as musa_compiler
-from triton.backends.musa.compiler import MUSABackend, MUSAOptions, _llc_extra_options, _resolve_toolchain_paths
+from triton.backends.mthreads import compiler as musa_compiler
+from triton.backends.mthreads.compiler import MUSABackend, MUSAOptions, _llc_extra_options, _resolve_toolchain_paths
 
 
 def _write_tool(path: Path, version: str) -> None:
