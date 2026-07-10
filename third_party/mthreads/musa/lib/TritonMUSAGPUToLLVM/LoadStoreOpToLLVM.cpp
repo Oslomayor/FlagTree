@@ -1060,12 +1060,11 @@ struct SqmmaLocalAllocOpConversion
     if (!op.isSharedMemoryAlloc() || !op.getSrc())
       return failure();
 
+    bool isSqmma = triton::musa::hasSqmmaOpIdxAttr(op.getOperation());
     auto srcTensorTy = dyn_cast<RankedTensorType>(op.getSrc().getType());
     bool isSqmmaAccumulatorSpill =
-        srcTensorTy &&
+        !isSqmma && srcTensorTy &&
         isa<triton::gpu::MUSASqmmaEncodingAttr>(srcTensorTy.getEncoding());
-
-    bool isSqmma = triton::musa::hasSqmmaOpIdxAttr(op.getOperation());
     if (!isSqmma && !isSqmmaAccumulatorSpill)
       return failure();
     Location loc = op.getLoc();
