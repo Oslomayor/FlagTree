@@ -91,6 +91,11 @@ from python.build_helpers import get_base_dir, get_cmake_dir
 YELLOW, NC = helper.get_console_colors()
 
 
+def should_build_proton(active_backend: str | None) -> bool:
+    backend_name = active_backend or os.getenv("FLAGTREE_BACKEND")
+    return backend_name != "mthreads" and check_env_flag("TRITON_BUILD_PROTON", "ON")
+
+
 def is_git_repo():
     """Return True if this file resides in a git repository"""
     return (Path(__file__).parent / ".git").is_dir()
@@ -478,7 +483,7 @@ class CMakeBuild(build_ext):
         # with an actionable message otherwise. Done here (build_ext) rather than at
         # import so non-build commands don't run the check.
         helper.check_pybind11_abi()
-        if active_backend not in ("xpu", ):
+        if active_backend not in ("xpu", "mthreads", ):
             download_and_copy_dependencies()
 
         try:
@@ -589,7 +594,7 @@ class CMakeBuild(build_ext):
         ]
         cmake_args += [f"-D{option}={os.getenv(option)}" for option in passthrough_args if option in os.environ]
 
-        if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
+        if should_build_proton(globals().get("active_backend")):
             cmake_args += self.get_proton_cmake_args()
 
         cmake_args += helper.customize_gluon_cmake_args()
@@ -727,7 +732,7 @@ def get_package_dirs():
             for x in os.listdir(backend.tools_dir):
                 yield (f"triton.tools.extra.{x}", os.path.join(backend.tools_dir, x))
 
-    if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
+    if should_build_proton(globals().get("active_backend")):
         yield ("triton.profiler", "third_party/proton/proton")
         yield ("triton.profiler.hooks", "third_party/proton/proton/hooks")
 
@@ -760,7 +765,7 @@ def get_packages():
             for x in os.listdir(backend.tools_dir):
                 yield f"triton.tools.extra.{x}"
 
-    if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
+    if should_build_proton(globals().get("active_backend")):
         yield "triton.profiler"
         yield "triton.profiler.hooks"
 
@@ -800,7 +805,7 @@ def add_link_to_proton():
 
 def add_links(external_only):
     add_link_to_backends(external_only=external_only)
-    if not external_only and check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
+    if not external_only and should_build_proton(globals().get("active_backend")):
         add_link_to_proton()
 
 
@@ -855,7 +860,7 @@ class plugin_sdist(sdist):
 
 def get_entry_points():
     entry_points = {}
-    if check_env_flag("TRITON_BUILD_PROTON", "ON"):  # Default ON
+    if should_build_proton(globals().get("active_backend")):
         entry_points["console_scripts"] = [
             "proton-viewer = triton.profiler.viewer:main",
             "proton = triton.profiler.proton:main",
