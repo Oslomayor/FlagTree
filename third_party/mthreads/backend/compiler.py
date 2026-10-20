@@ -763,7 +763,7 @@ class MUSAOptions:
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         if not extern_libs.get("libdevice", None):
             extern_libs["libdevice"] = knobs.musa.libdevice_path or str(default_libdir / "libdevice.31.bc")
-        if self.arch == "mp_31" and not extern_libs.get("printf", None):
+        if self.arch is not None and _capability_from_arch(self.arch) == 31 and not extern_libs.get("printf", None):
             extern_libs["printf"] = knobs.musa.libprintf_path or str(default_libdir / "libprintf.bc")
         object.__setattr__(self, "extern_libs", tuple(extern_libs.items()))
         assert self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0, \
