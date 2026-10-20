@@ -89,15 +89,17 @@ struct FpToFpOpConversion
     : public ElementwiseOpConversionBase<triton::FpToFpOp, FpToFpOpConversion> {
   using Base =
       ElementwiseOpConversionBase<triton::FpToFpOp, FpToFpOpConversion>;
-  using Base::Base;
   using OpAdaptor = typename Base::OpAdaptor;
 
   explicit FpToFpOpConversion(LLVMTypeConverter &typeConverter,
                               ModuleAxisInfoAnalysis &axisAnalysisPass,
                               bool enableFp8Burst2,
-                              PatternBenefit benefit = patternBenefitDefault)
+                              PatternBenefit benefit = patternBenefitDefault,
+                              bool nativeBf16Cvt = false)
       : Base(typeConverter, axisAnalysisPass, benefit),
-        enableFp8Burst2(enableFp8Burst2) {}
+        nativeBf16Cvt(nativeBf16Cvt), enableFp8Burst2(enableFp8Burst2) {}
+
+  const bool nativeBf16Cvt;
 
   struct Fp8ConversionDesc {
     StringRef funcName;
@@ -224,31 +226,35 @@ struct FpToFpOpConversion
     return ret;
   }
 
+  // The intrinsic selects the same FOP.MOV as a bare fpext/fptrunc on PH1+,
+  // and the call boundary stops InstCombine from fusing conversions into
+  // forms mtcc cannot select (e.g. fpext bfloat->double).
   static Value convertBf16ToFp32(Location loc,
                                  ConversionPatternRewriter &rewriter,
                                  const Value &v) {
-    SmallVector<Value> ops = {v};
-    SmallVector<Type, 1> resultTypes{f32_ty};
-    auto intrinsic = LLVM::createLLVMIntrinsicCallOp(
-        rewriter, loc, "llvm.musa.bfloat162float", resultTypes, ops);
-    return intrinsic.getResult(0);
+    return LLVM::createLLVMIntrinsicCallOp(
+               rewriter, loc, "llvm.musa.bfloat162float", f32_ty, {v})
+        .getResult(0);
   }
 
   static Value convertFp32ToBf16(Location loc,
                                  ConversionPatternRewriter &rewriter,
-                                 const Value &v, RoundingMode rounding) {
+                                 const Value &v, RoundingMode rounding,
+                                 bool nativeBf16) {
     if (rounding == RoundingMode::RTZ) {
+      if (nativeBf16)
+        return LLVM::createLLVMIntrinsicCallOp(
+                   rewriter, loc, "llvm.musa.float2bfloat16.rz", bf16_ty, {v})
+            .getResult(0);
       TritonLLVMOpBuilder b(loc, rewriter);
       auto asInt32 = b.bitcast(v, i32_ty);
       auto shifted = b.lshr(i32_ty, asInt32, b.i32_val(16));
       auto truncated = b.trunc(i16_ty, shifted);
       return b.bitcast(truncated, bf16_ty);
     }
-    SmallVector<Value> ops = {v};
-    SmallVector<Type, 1> resultTypes{bf16_ty};
-    auto intrinsic = LLVM::createLLVMIntrinsicCallOp(
-        rewriter, loc, "llvm.musa.float2bfloat16", resultTypes, ops);
-    return intrinsic.getResult(0);
+    return LLVM::createLLVMIntrinsicCallOp(
+               rewriter, loc, "llvm.musa.float2bfloat16", bf16_ty, {v})
+        .getResult(0);
   }
 
   static Value convertFp32ToFp16(Location loc,
@@ -379,7 +385,7 @@ struct FpToFpOpConversion
     }
     if (srcElemTy.isF32() && dstElemTy.isBF16()) {
       auto rounding = op.getRounding().value_or(RoundingMode::RTNE);
-      return {convertFp32ToBf16(loc, rewriter, src, rounding)};
+      return {convertFp32ToBf16(loc, rewriter, src, rounding, nativeBf16Cvt)};
     }
     if (srcElemTy.isF16() && dstElemTy.isF32()) {
       return {LLVM::FPExtOp::create(rewriter, loc, f32_ty, src)};
@@ -391,7 +397,7 @@ struct FpToFpOpConversion
     if (srcElemTy.isF16() && dstElemTy.isBF16()) {
       Value tmp = LLVM::FPExtOp::create(rewriter, loc, f32_ty, src);
       auto rounding = op.getRounding().value_or(RoundingMode::RTNE);
-      return {convertFp32ToBf16(loc, rewriter, tmp, rounding)};
+      return {convertFp32ToBf16(loc, rewriter, tmp, rounding, nativeBf16Cvt)};
     }
     if (srcElemTy.isBF16() && dstElemTy.isF16()) {
       Value tmp = convertBf16ToFp32(loc, rewriter, src);
@@ -492,8 +498,15 @@ struct PreciseDivOpConversion
 struct FDivOpConversion
     : ElementwiseOpConversionBase<arith::DivFOp, FDivOpConversion> {
   using Base = ElementwiseOpConversionBase<arith::DivFOp, FDivOpConversion>;
-  using Base::Base;
   using Adaptor = typename Base::OpAdaptor;
+
+  explicit FDivOpConversion(LLVMTypeConverter &typeConverter,
+                            ModuleAxisInfoAnalysis &axisAnalysisPass,
+                            PatternBenefit benefit, bool nativeBf16Cvt)
+      : Base(typeConverter, axisAnalysisPass, benefit),
+        nativeBf16Cvt(nativeBf16Cvt) {}
+
+  const bool nativeBf16Cvt;
 
   SmallVector<Value> createDestOps(arith::DivFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -504,13 +517,13 @@ struct FDivOpConversion
     // expansion is identical to this promote, so keep it for all targets.
     if (getElementType(op.getLhs()).isBF16() &&
         getElementType(op.getRhs()).isBF16()) {
-      auto lhs = FpToFpOpConversion::convertBf16ToFp32(loc, rewriter,
-                                                       operands[0][0]);
-      auto rhs = FpToFpOpConversion::convertBf16ToFp32(loc, rewriter,
-                                                       operands[0][1]);
+      auto lhs =
+          FpToFpOpConversion::convertBf16ToFp32(loc, rewriter, operands[0][0]);
+      auto rhs =
+          FpToFpOpConversion::convertBf16ToFp32(loc, rewriter, operands[0][1]);
       auto result = LLVM::FDivOp::create(rewriter, loc, f32_ty, lhs, rhs);
-      return {FpToFpOpConversion::convertFp32ToBf16(loc, rewriter, result,
-                                                    RoundingMode::RTNE)};
+      return {FpToFpOpConversion::convertFp32ToBf16(
+          loc, rewriter, result, RoundingMode::RTNE, nativeBf16Cvt)};
     }
     Value out = LLVM::FDivOp::create(rewriter, loc, elemTy, operands[0][0],
                                      operands[0][1]);
@@ -521,20 +534,27 @@ struct FDivOpConversion
 struct SIToFPOpConversion
     : ElementwiseOpConversionBase<arith::SIToFPOp, SIToFPOpConversion> {
   using Base = ElementwiseOpConversionBase<arith::SIToFPOp, SIToFPOpConversion>;
-  using Base::Base;
   using Adaptor = typename Base::OpAdaptor;
+
+  explicit SIToFPOpConversion(LLVMTypeConverter &typeConverter,
+                              ModuleAxisInfoAnalysis &axisAnalysisPass,
+                              PatternBenefit benefit, bool nativeBf16Cvt)
+      : Base(typeConverter, axisAnalysisPass, benefit),
+        nativeBf16Cvt(nativeBf16Cvt) {}
+
+  const bool nativeBf16Cvt;
 
   SmallVector<Value> createDestOps(arith::SIToFPOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
-    Type inElemTy = getElementType(op.getIn());
+    // Pre-PH1 cannot select a bare bf16 cvt; detour through f32 explicitly.
     Type outElemTy = getElementType(op.getOut());
-    if (outElemTy.isBF16()) {
+    if (outElemTy.isBF16() && !nativeBf16Cvt) {
       Value f32Val =
           LLVM::SIToFPOp::create(rewriter, loc, f32_ty, operands[0][0]);
-      return {FpToFpOpConversion::convertFp32ToBf16(loc, rewriter, f32Val,
-                                                    RoundingMode::RTNE)};
+      return {FpToFpOpConversion::convertFp32ToBf16(
+          loc, rewriter, f32Val, RoundingMode::RTNE, nativeBf16Cvt)};
     }
     return {LLVM::SIToFPOp::create(rewriter, loc, elemTy, operands[0][0])};
   }
@@ -543,16 +563,24 @@ struct SIToFPOpConversion
 struct FPToSIOpConversion
     : ElementwiseOpConversionBase<arith::FPToSIOp, FPToSIOpConversion> {
   using Base = ElementwiseOpConversionBase<arith::FPToSIOp, FPToSIOpConversion>;
-  using Base::Base;
   using Adaptor = typename Base::OpAdaptor;
+
+  explicit FPToSIOpConversion(LLVMTypeConverter &typeConverter,
+                              ModuleAxisInfoAnalysis &axisAnalysisPass,
+                              PatternBenefit benefit, bool nativeBf16Cvt)
+      : Base(typeConverter, axisAnalysisPass, benefit),
+        nativeBf16Cvt(nativeBf16Cvt) {}
+
+  const bool nativeBf16Cvt;
 
   SmallVector<Value> createDestOps(arith::FPToSIOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+    // Pre-PH1 detours through f32 like SIToFP. mtcc currently mis-lowers
+    // fptosi bfloat -> 64-bit int (test_int_bf16_cast.py xfail).
     Type inElemTy = getElementType(op.getIn());
-    Type outElemTy = getElementType(op.getOut());
-    if (inElemTy.isBF16()) {
+    if (inElemTy.isBF16() && !nativeBf16Cvt) {
       Value f32Val =
           FpToFpOpConversion::convertBf16ToFp32(loc, rewriter, operands[0][0]);
       return {LLVM::FPToSIOp::create(rewriter, loc, elemTy, f32Val)};
@@ -564,8 +592,9 @@ struct FPToSIOpConversion
 struct ExtFOpConversion
     : ElementwiseOpConversionBase<arith::ExtFOp, ExtFOpConversion> {
   using Base = ElementwiseOpConversionBase<arith::ExtFOp, ExtFOpConversion>;
-  using Base::Base;
   using Adaptor = typename Base::OpAdaptor;
+
+  using Base::Base;
 
   SmallVector<Value> createDestOps(arith::ExtFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
@@ -573,8 +602,12 @@ struct ExtFOpConversion
                                    Location loc) const {
     auto inElemTy = getElementType(op.getIn());
     Value src = operands[0][0];
-    if (inElemTy.isBF16())
+    if (inElemTy.isBF16()) {
+      // The frontend splits wider bf16 conversions at f32.
+      auto outElemTy = getElementType(op.getOut());
+      assert(outElemTy.isF32() && "unsupported conversion");
       return {FpToFpOpConversion::convertBf16ToFp32(loc, rewriter, src)};
+    }
     Value out = LLVM::FPExtOp::create(rewriter, loc, elemTy, src);
     return {out};
   }
@@ -583,18 +616,28 @@ struct ExtFOpConversion
 struct TruncFOpConversion
     : ElementwiseOpConversionBase<arith::TruncFOp, TruncFOpConversion> {
   using Base = ElementwiseOpConversionBase<arith::TruncFOp, TruncFOpConversion>;
-  using Base::Base;
   using Adaptor = typename Base::OpAdaptor;
+
+  explicit TruncFOpConversion(LLVMTypeConverter &typeConverter,
+                              ModuleAxisInfoAnalysis &axisAnalysisPass,
+                              PatternBenefit benefit, bool nativeBf16Cvt)
+      : Base(typeConverter, axisAnalysisPass, benefit),
+        nativeBf16Cvt(nativeBf16Cvt) {}
+
+  const bool nativeBf16Cvt;
 
   SmallVector<Value> createDestOps(arith::TruncFOp op, OpAdaptor adaptor,
                                    ConversionPatternRewriter &rewriter,
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
+    auto inElemTy = getElementType(op.getIn());
     auto outElemTy = getElementType(op.getOut());
     Value src = operands[0][0];
-    if (outElemTy.isBF16())
-      return {FpToFpOpConversion::convertFp32ToBf16(loc, rewriter, src,
-                                                    RoundingMode::RTNE)};
+    // The bf16 helper takes an f32 input; wider sources fall through to a
+    // bare fptrunc for mtcc to legalize.
+    if (outElemTy.isBF16() && inElemTy.isF32())
+      return {FpToFpOpConversion::convertFp32ToBf16(
+          loc, rewriter, src, RoundingMode::RTNE, nativeBf16Cvt)};
     Value out = LLVM::FPTruncOp::create(rewriter, loc, elemTy, src);
     return {out};
   }
@@ -625,12 +668,15 @@ struct ExpOpConversionApprox
 
 void mlir::triton::MUSA::populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
-    ModuleAxisInfoAnalysis &axisInfoAnalysis, int /*computeCapability*/,
-    bool enableFp8Burst2, const TargetInfo &targetInfo,
-    PatternBenefit benefit) {
+    ModuleAxisInfoAnalysis &axisInfoAnalysis, int computeCapability,
+    bool enableFp8Burst2, const TargetInfo &targetInfo, PatternBenefit benefit) {
   PatternBenefit priorityBenefit(benefit.getBenefit() + 1);
+  // Pre-PH1 cannot select plain bf16 cvt ops and uses intrinsics instead.
+  const bool nativeBf16Cvt = computeCapability >= 31;
+  // Use higher priority than generic TritonGPU elementwise lowering so the
+  // MUSA-specific FP/bfloat/math lowering is selected first.
   patterns.add<FDivOpConversion>(typeConverter, axisInfoAnalysis,
-                                 priorityBenefit);
+                                 priorityBenefit, nativeBf16Cvt);
   patterns.add<DivSIOpConversion>(typeConverter, axisInfoAnalysis,
                                   priorityBenefit);
   patterns.add<RemSIOpConversion>(typeConverter, axisInfoAnalysis,
@@ -643,11 +689,14 @@ void mlir::triton::MUSA::populateElementwiseOpToLLVMPatterns(
   POPULATE_OP(arith::MulFOp, LLVM::FMulOp);
 #undef POPULATE_OP
   patterns.add<ExtFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<TruncFOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis, benefit);
-  patterns.add<FpToFpOpConversion>(typeConverter, axisInfoAnalysis,
-                                   enableFp8Burst2, benefit);
+  patterns.add<TruncFOpConversion>(typeConverter, axisInfoAnalysis, benefit,
+                                   nativeBf16Cvt);
+  patterns.add<FPToSIOpConversion>(typeConverter, axisInfoAnalysis, benefit,
+                                   nativeBf16Cvt);
+  patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis, benefit,
+                                   nativeBf16Cvt);
+  patterns.add<FpToFpOpConversion>(typeConverter, axisInfoAnalysis, enableFp8Burst2, benefit,
+                                   nativeBf16Cvt);
   patterns.add<PreciseSqrtOpConversion>(typeConverter, axisInfoAnalysis,
                                         priorityBenefit);
   patterns.add<PreciseDivOpConversion>(typeConverter, axisInfoAnalysis,
