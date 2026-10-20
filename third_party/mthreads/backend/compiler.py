@@ -724,7 +724,7 @@ def _llc_extra_options(metadata: Dict[str, object], options: "MUSAOptions", capa
 class MUSAOptions:
     num_warps: int = 4
     num_ctas: int = 1
-    num_stages: int = 3
+    num_stages: int = 1
     warp_size: int = 32
     maxnreg: Optional[int] = None
     cluster_dims: tuple = (1, 1, 1)  # flagtree mthreads3.2

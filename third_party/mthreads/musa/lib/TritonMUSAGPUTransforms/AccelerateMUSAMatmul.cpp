@@ -674,7 +674,10 @@ planSharedMemorySqmmaOperand(Value v, bool allowTranspose) {
     return std::nullopt;
 
   SmallVector<unsigned> newOrder = ttg::getOrderForMemory(argType);
-  if (!allowTranspose) {
+  bool preserveRank2SourceOrder =
+      rank == 2 && (argType.getElementType().isF16() ||
+                    argType.getElementType().isBF16());
+  if (!allowTranspose && !preserveRank2SourceOrder) {
     newOrder.clear();
     for (int dim = static_cast<int>(rank) - 1; dim >= 0; --dim)
       newOrder.push_back(static_cast<unsigned>(dim));
