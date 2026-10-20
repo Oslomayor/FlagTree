@@ -58,7 +58,7 @@ def test_default_libprintf_path(fresh_knobs):
 
 
 def test_non_mp31_does_not_add_libprintf():
-    backend = backends["mthreads"].compiler(GPUTarget("musa", "qy2", 128))
+    backend = backends["mthreads"].compiler(GPUTarget("musa", 22, 128))
 
     options = backend.parse_options({})
 
