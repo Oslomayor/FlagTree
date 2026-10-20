@@ -3718,9 +3718,10 @@ def test_dot(M, N, K, num_warps, col_a, col_b, epilogue, input_precision, in_dty
     if is_musa() and in_dtype == 'int8':
         llir = pgm.asm['llir']
         native_s8 = re.search(r'llvm\.musa\.(sqmma\.smma|imma)\.m\d+n\d+k\d+\.mma', llir)
-        # PH1 integer WMMA needs at least an 8x16 output tile per warp.
-        # Excess warps must use integer FMA rather than cover the tile again.
-        if is_musa_ph1() and M * N < num_warps * 8 * 16:
+        # Integer WMMA needs an 8x16 tile per PH1 warp or a 32x32 tile
+        # per QY2 logical warp. Excess warps must use integer FMA.
+        min_wmma_tile = 32 * 32 if torch.musa.get_device_capability()[0] == 2 else 8 * 16
+        if M * N < num_warps * min_wmma_tile:
             assert native_s8 is None, 'oversized warp counts must use the integer FMA fallback'
             assert re.search(r'\bmul(?: (nsw|nuw))* (?:<\d+ x i32>|i32)', llir), \
                 'the FMA fallback must retain integer multiplication'
