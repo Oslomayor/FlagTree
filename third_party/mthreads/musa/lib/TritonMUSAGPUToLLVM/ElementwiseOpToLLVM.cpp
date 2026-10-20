@@ -476,19 +476,7 @@ private:
   bool enableFp8Burst2 = false;
 };
 
-template <typename OpType>
-Value emitDualBF16ElementwiseOp(Location loc,
-                                ConversionPatternRewriter &rewriter,
-                                MultipleOperandsRange operands) {
-  auto lhs =
-      FpToFpOpConversion::convertBf16ToFp32(loc, rewriter, operands[0][0]);
-  auto rhs =
-      FpToFpOpConversion::convertBf16ToFp32(loc, rewriter, operands[0][1]);
-  auto result = OpType::create(rewriter, loc, f32_ty, lhs, rhs);
-  return FpToFpOpConversion::convertFp32ToBf16(loc, rewriter, result,
-                                               RoundingMode::RTNE);
-}
-
+// Lower triton.precise_sqrt through f64 for better f32 precision.
 struct PreciseSqrtOpConversion
     : public ElementwiseOpConversionBase<triton::PreciseSqrtOp,
                                          PreciseSqrtOpConversion> {
@@ -577,10 +565,18 @@ struct FDivOpConversion
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
     TritonLLVMOpBuilder b(loc, rewriter);
-    auto lhsElemTy = getElementType(op.getLhs());
-    auto rhsElemTy = getElementType(op.getRhs());
-    if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {emitDualBF16ElementwiseOp<LLVM::FDivOp>(loc, rewriter, operands)};
+    // Only tl.fdiv reaches here with bf16 (`/` is promoted to f32 by the
+    // frontend). mtcc cannot expand fdiv bfloat on QY1/QY2, and PH1's
+    // expansion is identical to this promote, so keep it for all targets.
+    if (getElementType(op.getLhs()).isBF16() &&
+        getElementType(op.getRhs()).isBF16()) {
+      auto lhs = FpToFpOpConversion::convertBf16ToFp32(loc, rewriter,
+                                                       operands[0][0]);
+      auto rhs = FpToFpOpConversion::convertBf16ToFp32(loc, rewriter,
+                                                       operands[0][1]);
+      auto result = LLVM::FDivOp::create(rewriter, loc, f32_ty, lhs, rhs);
+      return {FpToFpOpConversion::convertFp32ToBf16(loc, rewriter, result,
+                                                    RoundingMode::RTNE)};
     }
     Type logicalElemTy =
         typeConverter->convertType(getElementType(op.getResult()));
@@ -603,13 +599,7 @@ struct FMulOpConversion
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
     TritonLLVMOpBuilder b(loc, rewriter);
-    auto lhsElemTy = getElementType(op.getLhs());
-    auto rhsElemTy = getElementType(op.getRhs());
-    if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {emitDualBF16ElementwiseOp<LLVM::FMulOp>(loc, rewriter, operands)};
-    }
-    Type logicalElemTy =
-        typeConverter->convertType(getElementType(op.getResult()));
+    Type logicalElemTy = typeConverter->convertType(getElementType(op.getResult()));
     Type packedElemTy = getConvertedElementType(op.getType(), typeConverter);
     Value lhs = maybeBitcastSameWidth(b, operands[0][0], logicalElemTy);
     Value rhs = maybeBitcastSameWidth(b, operands[0][1], logicalElemTy);
@@ -629,13 +619,7 @@ struct FAddOpConversion
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
     TritonLLVMOpBuilder b(loc, rewriter);
-    auto lhsElemTy = getElementType(op.getLhs());
-    auto rhsElemTy = getElementType(op.getRhs());
-    if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {emitDualBF16ElementwiseOp<LLVM::FAddOp>(loc, rewriter, operands)};
-    }
-    Type logicalElemTy =
-        typeConverter->convertType(getElementType(op.getResult()));
+    Type logicalElemTy = typeConverter->convertType(getElementType(op.getResult()));
     Type packedElemTy = getConvertedElementType(op.getType(), typeConverter);
     Value lhs = maybeBitcastSameWidth(b, operands[0][0], logicalElemTy);
     Value rhs = maybeBitcastSameWidth(b, operands[0][1], logicalElemTy);
@@ -655,13 +639,7 @@ struct FSubOpConversion
                                    Type elemTy, MultipleOperandsRange operands,
                                    Location loc) const {
     TritonLLVMOpBuilder b(loc, rewriter);
-    auto lhsElemTy = getElementType(op.getLhs());
-    auto rhsElemTy = getElementType(op.getRhs());
-    if (lhsElemTy.isBF16() && rhsElemTy.isBF16()) {
-      return {emitDualBF16ElementwiseOp<LLVM::FSubOp>(loc, rewriter, operands)};
-    }
-    Type logicalElemTy =
-        typeConverter->convertType(getElementType(op.getResult()));
+    Type logicalElemTy = typeConverter->convertType(getElementType(op.getResult()));
     Type packedElemTy = getConvertedElementType(op.getType(), typeConverter);
     Value lhs = maybeBitcastSameWidth(b, operands[0][0], logicalElemTy);
     Value rhs = maybeBitcastSameWidth(b, operands[0][1], logicalElemTy);
