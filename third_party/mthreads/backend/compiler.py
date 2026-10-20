@@ -317,12 +317,14 @@ def _local_backend_tool_path(binary: str) -> Optional[str]:
 
 
 def _select_tool_path(binary: str, explicit_path: Optional[str], tool_getter) -> Optional[str]:
-    local_path = _local_backend_tool_path(binary)
-    if local_path:
-        return local_path
+    # Honor an explicit toolchain override before the bundled binaries. New
+    # lowering contracts may require a newer MTCC than the wheel contains.
     path = _validated_tool_path(explicit_path)
     if path:
         return path
+    local_path = _local_backend_tool_path(binary)
+    if local_path:
+        return local_path
     return _maybe_tool_path(tool_getter())
 
 
