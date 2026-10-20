@@ -38,7 +38,6 @@ from triton._internal_testing import (
     is_hip_gfx1250,
     is_musa,
     is_musa_ph1,
-    is_musa_qy,
     is_xpu,
     get_arch,
     torch_float8_dtypes,
@@ -1051,7 +1050,7 @@ def test_abs_fp8(in_dtype, device):
     elif is_musa():
         if in_dtype == tl.float8e4b15 and is_musa_ph1():
             pytest.skip("float8e4nv not supported on PH arch")
-        if is_musa_qy():
+        if torch.musa.get_device_capability()[0] == 2:
             pytest.skip("test_abs_fp8 not supported on QY arch")
 
     @triton.jit

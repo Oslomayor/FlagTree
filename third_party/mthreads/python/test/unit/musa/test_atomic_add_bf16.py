@@ -5,7 +5,6 @@ import triton
 import triton.language as tl
 from triton.runtime.driver import driver
 
-
 pytestmark = pytest.mark.skipif(
     not hasattr(torch, "musa") or not torch.musa.is_available(),
     reason="requires torch.musa runtime",
@@ -51,20 +50,24 @@ _ATOMIC_CASES = (
     [("add", dtype) for dtype in ("float16", "bfloat16", "float32", "float64", "int32", "uint32", "int64", "uint64")]
     # atomic_min/max support integer types and f32/f64. Float min/max are
     # implemented in the frontend with integer atomics on the bit pattern.
-    + [(op, dtype) for op in ("min", "max")
-       for dtype in ("float32", "float64", "int32", "uint32", "int64", "uint64")]
+    + [(op, dtype) for op in ("min", "max") for dtype in ("float32", "float64", "int32", "uint32", "int64", "uint64")]
     # Bitwise atomics only support 32/64-bit integer types.
-    + [(op, dtype) for op in ("and", "or", "xor")
-       for dtype in ("int32", "uint32", "int64", "uint64")]
+    + [(op, dtype) for op in ("and", "or", "xor") for dtype in ("int32", "uint32", "int64", "uint64")]
     # The frontend restricts atomic_xchg to f32/f64 and 32/64-bit integers;
     # f16/bf16 are currently only valid for atomic_add.
-    + [("xchg", dtype) for dtype in ("float32", "float64", "int32", "uint32", "int64", "uint64")]
-)
+    + [("xchg", dtype) for dtype in ("float32", "float64", "int32", "uint32", "int64", "uint64")])
 
 _ATOMIC_CAS_DTYPES = (
-    "int16", "uint16", "float16", "bfloat16",
-    "int32", "uint32", "float32",
-    "int64", "uint64", "float64",
+    "int16",
+    "uint16",
+    "float16",
+    "bfloat16",
+    "int32",
+    "uint32",
+    "float32",
+    "int64",
+    "uint64",
+    "float64",
 )
 
 
@@ -100,18 +103,18 @@ def _make_atomic_inputs(op, dtype_name, num_updates, device):
     else:
         raise AssertionError(f"unknown atomic op: {op}")
 
-    dst, dst_base = _make_tensor(dtype_name, (1,), initial, device)
-    value, _ = _make_tensor(dtype_name, (1,), value, device)
-    old_values, _ = _make_tensor(dtype_name, (num_updates,), 0, device)
+    dst, dst_base = _make_tensor(dtype_name, (1, ), initial, device)
+    value, _ = _make_tensor(dtype_name, (1, ), value, device)
+    old_values, _ = _make_tensor(dtype_name, (num_updates, ), 0, device)
     expected = torch.full_like(dst_base, expected)
     return dst, value, old_values, expected, is_float
 
 
 def _make_atomic_cas_inputs(dtype_name, num_updates, device):
-    dst, dst_base = _make_tensor(dtype_name, (1,), 0, device)
-    compare, _ = _make_tensor(dtype_name, (1,), 0, device)
-    value, _ = _make_tensor(dtype_name, (1,), 7, device)
-    old_values, _ = _make_tensor(dtype_name, (num_updates,), 0, device)
+    dst, dst_base = _make_tensor(dtype_name, (1, ), 0, device)
+    compare, _ = _make_tensor(dtype_name, (1, ), 0, device)
+    value, _ = _make_tensor(dtype_name, (1, ), 7, device)
+    old_values, _ = _make_tensor(dtype_name, (num_updates, ), 0, device)
     expected = torch.full_like(dst_base, 7)
     return dst, compare, value, old_values, expected
 
@@ -123,14 +126,10 @@ def test_atomic_rmw(op, dtype_name):
         pytest.skip("MUSA native floating atomics are currently implemented for PH1/PH1S")
 
     num_updates = 33
-    dst, value, old_values, expected, is_float = _make_atomic_inputs(
-        op, dtype_name, num_updates, "musa"
-    )
+    dst, value, old_values, expected, is_float = _make_atomic_inputs(op, dtype_name, num_updates, "musa")
 
     _atomic_rmw_kernel.device_caches.clear()
-    _atomic_rmw_kernel[(num_updates,)](
-        dst, value, old_values, op, num_warps=1
-    )
+    _atomic_rmw_kernel[(num_updates, )](dst, value, old_values, op, num_warps=1)
     torch.musa.synchronize()
 
     device = driver.active.get_current_device()
@@ -164,14 +163,10 @@ def test_atomic_cas(dtype_name):
         pytest.skip("MUSA atomic tests are currently enabled for PH1/PH1S")
 
     num_updates = 33
-    dst, compare, value, old_values, expected = _make_atomic_cas_inputs(
-        dtype_name, num_updates, "musa"
-    )
+    dst, compare, value, old_values, expected = _make_atomic_cas_inputs(dtype_name, num_updates, "musa")
 
     _atomic_cas_kernel.device_caches.clear()
-    _atomic_cas_kernel[(num_updates,)](
-        dst, compare, value, old_values, num_warps=1
-    )
+    _atomic_cas_kernel[(num_updates, )](dst, compare, value, old_values, num_warps=1)
     torch.musa.synchronize()
 
     device = driver.active.get_current_device()

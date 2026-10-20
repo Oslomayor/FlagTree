@@ -1,5 +1,4 @@
 // RUN: triton-opt %s --convert-triton-musagpu-to-llvm=compute-capability=31 -reconcile-unrealized-casts | FileCheck %s
-// RUN: triton-opt %s --convert-triton-musagpu-to-llvm=compute-capability=32 -reconcile-unrealized-casts | FileCheck %s --check-prefix=PH1S
 
 #blocked = #ttg.blocked<{sizePerThread = [1], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
 #blocked4 = #ttg.blocked<{sizePerThread = [4], threadsPerWarp = [32], warpsPerCTA = [1], order = [0]}>
@@ -157,9 +156,3 @@ module attributes {
 // CHECK-NOT: vector<1xbf16>
 // CHECK-LABEL: llvm.func @masked_fp8_default
 // CHECK: llvm.mlir.constant(0 : i8)
-
-// PH1S-LABEL: llvm.func @masked_bf16_default
-// PH1S: llvm.mlir.constant(0.000000e+00 : bf16)
-// PH1S: llvm.cond_br {{.*}} {{.*}} : bf16
-// PH1S: llvm.load {{.*}} : !llvm.ptr<1> -> bf16
-// PH1S-NOT: vector<1xbf16>

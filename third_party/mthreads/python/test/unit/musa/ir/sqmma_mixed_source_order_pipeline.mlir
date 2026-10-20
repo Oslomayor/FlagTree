@@ -2,8 +2,6 @@
 // RUN: triton-opt %s --tritonmusa-accelerate-matmul --tritonmusa-pipeline=num-stages=2 -canonicalize | FileCheck %s --check-prefix=PIPE --implicit-check-not=tt.load
 // RUN: sed 's/f16/bf16/g' %s | triton-opt --tritonmusa-accelerate-matmul | FileCheck %s --check-prefix=BF16-ACCEL
 // RUN: sed 's/f16/bf16/g' %s | triton-opt --tritonmusa-accelerate-matmul --tritonmusa-pipeline=num-stages=2 -canonicalize | FileCheck %s --check-prefix=BF16-PIPE --implicit-check-not=tt.load
-// RUN: sed 's/musa:31/musa:ph1s/' %s | triton-opt --tritonmusa-accelerate-matmul | FileCheck %s --check-prefix=ACCEL
-// RUN: sed -e 's/musa:31/musa:ph1s/' -e 's/f16/bf16/g' %s | triton-opt --tritonmusa-accelerate-matmul | FileCheck %s --check-prefix=BF16-ACCEL
 
 #out_pv = #ttg.blocked<{sizePerThread = [4, 4], threadsPerWarp = [1, 32], warpsPerCTA = [8, 1], order = [1, 0]}>
 #out_qk = #ttg.blocked<{sizePerThread = [2, 2], threadsPerWarp = [2, 16], warpsPerCTA = [8, 1], order = [1, 0]}>

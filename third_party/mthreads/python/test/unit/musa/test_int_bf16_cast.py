@@ -35,8 +35,7 @@ def _rand_int(dtype, size, device):
     if dtype == torch.uint64:
         # torch.randint cannot cover the full uint64 range; int64 bits reinterpreted
         # still exercises every representable bit pattern uniformly enough.
-        return torch.randint(-2**63, 2**63 - 1, (size, ), dtype=torch.int64,
-                             device=device).view(torch.uint64)
+        return torch.randint(-2**63, 2**63 - 1, (size, ), dtype=torch.int64, device=device).view(torch.uint64)
     return torch.randint(info.min, info.max, (size, ), dtype=dtype, device=device)
 
 
@@ -71,8 +70,8 @@ def test_bf16_to_int(device, dtype, request):
     # the hardware and the torch reference, so it cannot be part of the contract.
     lo, hi = max(info.min // 4, -2**62), min(info.max // 4, 2**62)
     floats = torch.empty(SIZE, dtype=torch.float32, device=device).uniform_(lo, hi)
-    specials = torch.tensor([0.0, 0.5, -0.5, 0.999, -0.999, 1.5, -1.5, 127.5, 255.5],
-                            dtype=torch.float32, device=device)
+    specials = torch.tensor([0.0, 0.5, -0.5, 0.999, -0.999, 1.5, -1.5, 127.5, 255.5], dtype=torch.float32,
+                            device=device)
     in_range = (specials >= info.min) & (specials <= info.max)
     x = torch.cat([floats, specials[in_range]]).to(torch.bfloat16)
 
@@ -86,10 +85,9 @@ def test_bf16_to_int(device, dtype, request):
         # muDNN has no UINT64 EQ kernel; compare the bit patterns instead.
         out_bits, ref_bits = out.view(torch.int64), ref.view(torch.int64)
     mismatches = (out_bits != ref_bits).nonzero().flatten()
-    assert mismatches.numel() == 0, (
-        f"{mismatches.numel()} mismatches, first ones: "
-        f"in={x[mismatches[:5]].float().tolist()} "
-        f"out={out[mismatches[:5]].tolist()} ref={ref[mismatches[:5]].tolist()}")
+    assert mismatches.numel() == 0, (f"{mismatches.numel()} mismatches, first ones: "
+                                     f"in={x[mismatches[:5]].float().tolist()} "
+                                     f"out={out[mismatches[:5]].tolist()} ref={ref[mismatches[:5]].tolist()}")
 
 
 # Same-width (bf16<->f16) and wide (bf16<->f64) float casts have no coverage in
@@ -113,9 +111,9 @@ def test_bf16_float_cast(device, src_dtype, dst_dtype, request):
     sample_dtype = torch.float64 if src_dtype == torch.float64 else torch.float32
     floats = torch.empty(SIZE, dtype=sample_dtype, device=device).uniform_(-1e4, 1e4)
     specials = torch.tensor(
-        [0.0, 1.0, -1.0, 0.1, 1.0 + 2**-9, 65504.0, -65504.0, 65520.0, 6e-5,
-         1e30, -1e30, float("inf"), float("-inf")],
-        dtype=sample_dtype, device=device)
+        [0.0, 1.0, -1.0, 0.1, 1.0 + 2**-9, 65504.0, -65504.0, 65520.0, 6e-5, 1e30, -1e30,
+         float("inf"),
+         float("-inf")], dtype=sample_dtype, device=device)
     x = torch.cat([floats, specials]).to(src_dtype)
 
     out = torch.empty(x.numel(), dtype=dst_dtype, device=device)
@@ -124,8 +122,7 @@ def test_bf16_float_cast(device, src_dtype, dst_dtype, request):
 
     ref = x.to(dst_dtype)
     mismatches = (out != ref).nonzero().flatten()
-    assert mismatches.numel() == 0, (
-        f"{mismatches.numel()} mismatches, first ones: "
-        f"in={x[mismatches[:5]].float().tolist()} "
-        f"out={out[mismatches[:5]].float().tolist()} "
-        f"ref={ref[mismatches[:5]].float().tolist()}")
+    assert mismatches.numel() == 0, (f"{mismatches.numel()} mismatches, first ones: "
+                                     f"in={x[mismatches[:5]].float().tolist()} "
+                                     f"out={out[mismatches[:5]].float().tolist()} "
+                                     f"ref={ref[mismatches[:5]].float().tolist()}")

@@ -903,8 +903,7 @@ static LinearLayout musaQY2WMMAToOperandLinearLayout(DotOperandEncodingAttr dot,
     // wrong vector passed to ffmma.m32n32k16.
     LinearLayout ctaLayout(
         {{S("register"), {{0, 1}, {16, 0}}},
-         {S("lane"), {{0, 2}, {0, 4}, {1, 0}, {2, 0}, {4, 0},
-                        {8, 0}, {0, 8}}},
+         {S("lane"), {{0, 2}, {0, 4}, {1, 0}, {2, 0}, {4, 0}, {8, 0}, {0, 8}}},
          {S("warp"), {}},
          {S("block"), {}}},
         {dimM, dimA_K});
@@ -931,12 +930,12 @@ static LinearLayout musaQY2WMMAToOperandLinearLayout(DotOperandEncodingAttr dot,
   //
   //   lane:     K2,K4,N1,N2,N4,N8,K8
   //   register: K1,N16
-  LinearLayout ctaLayout({{S("register"), {{1, 0}, {0, 16}}},
-                          {S("lane"), {{2, 0}, {4, 0}, {0, 1}, {0, 2},
-                                         {0, 4}, {0, 8}, {8, 0}}},
-                          {S("warp"), {}},
-                          {S("block"), {}}},
-                         {dimB_K, dimN});
+  LinearLayout ctaLayout(
+      {{S("register"), {{1, 0}, {0, 16}}},
+       {S("lane"), {{2, 0}, {4, 0}, {0, 1}, {0, 2}, {0, 4}, {0, 8}, {8, 0}}},
+       {S("warp"), {}},
+       {S("block"), {}}},
+      {dimB_K, dimN});
   // Cross-tile K recurrence stored in register.
   ctaLayout *= LinearLayout::identity1D(
       std::max<int64_t>(1, shape[kIndexB] / static_cast<int64_t>(instK)),
@@ -979,7 +978,6 @@ LinearLayout MUSAWmmaEncodingAttr::getInstrTileLayout() const {
     // mtgpu_qy2_store_matrix_d_32x32_s32_row:
     // lane bits are N1,N2,N4,M1,M2,N8,M4.
     laneBases = {{0, 1}, {0, 2}, {0, 4}, {1, 0}, {2, 0}};
-
   } else {
     assert(isPH1() && "unsupported MUSA WMMA encoding version");
     laneBases = {{0, 1}, {0, 2}, {0, 4}, {1, 0}, {2, 0}};

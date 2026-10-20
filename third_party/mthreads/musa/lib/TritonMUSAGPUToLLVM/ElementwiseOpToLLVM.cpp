@@ -49,8 +49,7 @@ struct DivSIOpConversion
     Type widenedTy = rewriter.getI32Type();
     Value lhsWide = LLVM::SExtOp::create(rewriter, loc, widenedTy, lhs);
     Value rhsWide = LLVM::SExtOp::create(rewriter, loc, widenedTy, rhs);
-    Value outWide =
-        createI32SignedDivCall(op, loc, rewriter, lhsWide, rhsWide);
+    Value outWide = createI32SignedDivCall(op, loc, rewriter, lhsWide, rhsWide);
     Value out = LLVM::TruncOp::create(rewriter, loc, elemTy, outWide);
     return {out};
   }
@@ -356,9 +355,8 @@ struct FpToFpOpConversion
           SmallVector<Value> outVals;
           outVals.reserve(operands.size());
           for (unsigned i = 0; i < operands.size(); ++i) {
-            outVals.push_back(
-                convertFp8DowncastRTZ(loc, rewriter, op, operands[i][0],
-                                      srcElemTy, dstElemTy));
+            outVals.push_back(convertFp8DowncastRTZ(
+                loc, rewriter, op, operands[i][0], srcElemTy, dstElemTy));
           }
           return outVals;
         }
@@ -373,7 +371,8 @@ struct FpToFpOpConversion
       SmallVector<Value> inVals;
       for (unsigned i = 0; i < std::min(numElements, operands.size()); ++i)
         inVals.push_back(operands[i][0]);
-      inVals.resize(numElements, b.undef(typeConverter->convertType(srcElemTy)));
+      inVals.resize(numElements,
+                    b.undef(typeConverter->convertType(srcElemTy)));
       auto outVals = convertFp8(getTypeConverter(), op, loc, rewriter, inVals,
                                 srcElemTy, dstElemTy, funcName);
       outVals.resize(std::min(numElements, operands.size()));
@@ -409,16 +408,12 @@ struct FpToFpOpConversion
 
     // Fallback to LLVM FP trunc/ext when applicable.
     if (isa<FloatType>(srcElemTy) && isa<FloatType>(dstElemTy)) {
-      if (srcElemTy.getIntOrFloatBitWidth() <
-          dstElemTy.getIntOrFloatBitWidth())
-        return {LLVM::FPExtOp::create(rewriter, loc,
-                                      typeConverter->convertType(dstElemTy),
-                                      src)};
-      if (srcElemTy.getIntOrFloatBitWidth() >
-          dstElemTy.getIntOrFloatBitWidth())
-        return {LLVM::FPTruncOp::create(rewriter, loc,
-                                        typeConverter->convertType(dstElemTy),
-                                        src)};
+      if (srcElemTy.getIntOrFloatBitWidth() < dstElemTy.getIntOrFloatBitWidth())
+        return {LLVM::FPExtOp::create(
+            rewriter, loc, typeConverter->convertType(dstElemTy), src)};
+      if (srcElemTy.getIntOrFloatBitWidth() > dstElemTy.getIntOrFloatBitWidth())
+        return {LLVM::FPTruncOp::create(
+            rewriter, loc, typeConverter->convertType(dstElemTy), src)};
     }
 
     return {};
@@ -450,7 +445,8 @@ struct PreciseSqrtOpConversion
     // improved precision.
     Type f64Ty = rewriter.getF64Type();
     Type f32Ty = rewriter.getF32Type();
-    Value inputF64 = LLVM::FPExtOp::create(rewriter, loc, f64Ty, operands[0][0]);
+    Value inputF64 =
+        LLVM::FPExtOp::create(rewriter, loc, f64Ty, operands[0][0]);
 
     Type funcType = getFunctionType(f64Ty, ValueRange{inputF64});
     LLVM::LLVMFuncOp funcOp =
@@ -669,7 +665,8 @@ struct ExpOpConversionApprox
 void mlir::triton::MUSA::populateElementwiseOpToLLVMPatterns(
     LLVMTypeConverter &typeConverter, RewritePatternSet &patterns,
     ModuleAxisInfoAnalysis &axisInfoAnalysis, int computeCapability,
-    bool enableFp8Burst2, const TargetInfo &targetInfo, PatternBenefit benefit) {
+    bool enableFp8Burst2, const TargetInfo &targetInfo,
+    PatternBenefit benefit) {
   PatternBenefit priorityBenefit(benefit.getBenefit() + 1);
   // Pre-PH1 cannot select plain bf16 cvt ops and uses intrinsics instead.
   const bool nativeBf16Cvt = computeCapability >= 31;
@@ -695,8 +692,8 @@ void mlir::triton::MUSA::populateElementwiseOpToLLVMPatterns(
                                    nativeBf16Cvt);
   patterns.add<SIToFPOpConversion>(typeConverter, axisInfoAnalysis, benefit,
                                    nativeBf16Cvt);
-  patterns.add<FpToFpOpConversion>(typeConverter, axisInfoAnalysis, enableFp8Burst2, benefit,
-                                   nativeBf16Cvt);
+  patterns.add<FpToFpOpConversion>(typeConverter, axisInfoAnalysis,
+                                   enableFp8Burst2, benefit, nativeBf16Cvt);
   patterns.add<PreciseSqrtOpConversion>(typeConverter, axisInfoAnalysis,
                                         priorityBenefit);
   patterns.add<PreciseDivOpConversion>(typeConverter, axisInfoAnalysis,

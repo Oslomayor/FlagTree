@@ -191,8 +191,8 @@ private:
              ++maskIt) {
           SmallVector<Value> shfl(acc.size());
           for (unsigned i = 0; i < acc.size(); ++i)
-            shfl[i] = targetInfo.shuffleXor(rewriter, op.getLoc(), acc[i],
-                                             *maskIt);
+            shfl[i] =
+                targetInfo.shuffleXor(rewriter, op.getLoc(), acc[i], *maskIt);
           accumulate(op.getLoc(), rewriter, op.getCombineOp(), acc, shfl);
         }
       } else {

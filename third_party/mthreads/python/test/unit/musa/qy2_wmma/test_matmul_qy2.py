@@ -16,9 +16,21 @@ def get_resolution(dtype):
 
 @triton.jit
 def _qy2_matmul_kernel(
-    A, B, C, M, N, K,
-    stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+    A,
+    B,
+    C,
+    M,
+    N,
+    K,
+    stride_am,
+    stride_ak,
+    stride_bk,
+    stride_bn,
+    stride_cm,
+    stride_cn,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -47,10 +59,22 @@ def triton_matmul(a, b, num_warps=1):
     c = torch.empty((M, N), dtype=torch.float32, device=a.device)
     grid = (triton.cdiv(M, 32), triton.cdiv(N, 32))
     _qy2_matmul_kernel[grid](
-        a, b, c, M, N, K,
-        a.stride(0), a.stride(1), b.stride(0), b.stride(1),
-        c.stride(0), c.stride(1),
-        BLOCK_M=32, BLOCK_N=32, BLOCK_K=16, num_warps=num_warps,
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        a.stride(0),
+        a.stride(1),
+        b.stride(0),
+        b.stride(1),
+        c.stride(0),
+        c.stride(1),
+        BLOCK_M=32,
+        BLOCK_N=32,
+        BLOCK_K=16,
+        num_warps=num_warps,
     )
     return c
 

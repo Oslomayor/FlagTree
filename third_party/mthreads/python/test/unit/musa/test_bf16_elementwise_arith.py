@@ -38,10 +38,8 @@ def test_bf16_binary_arith(device, op):
     torch.manual_seed(0)
     a = torch.randn(SIZE, dtype=torch.float32, device=device) * 100
     b = torch.randn(SIZE, dtype=torch.float32, device=device) * 100
-    specials_a = torch.tensor([0.0, 1.0, -1.0, 0.1, 65504.0, -65504.0, 1e30, -1e30],
-                              dtype=torch.float32, device=device)
-    specials_b = torch.tensor([1.0, -1.0, 2.0, 0.5, 1.0, -1.0, 1e-30, 1e30],
-                              dtype=torch.float32, device=device)
+    specials_a = torch.tensor([0.0, 1.0, -1.0, 0.1, 65504.0, -65504.0, 1e30, -1e30], dtype=torch.float32, device=device)
+    specials_b = torch.tensor([1.0, -1.0, 2.0, 0.5, 1.0, -1.0, 1e-30, 1e30], dtype=torch.float32, device=device)
     a = torch.cat([a, specials_a]).to(torch.bfloat16)
     b = torch.cat([b, specials_b]).to(torch.bfloat16)
 

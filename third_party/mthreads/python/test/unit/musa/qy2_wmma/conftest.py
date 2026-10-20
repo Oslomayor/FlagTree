@@ -18,9 +18,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 def pytest_collection_modifyitems(config, items):
     if _CAP_CODE == 22:
         return
-    skip_marker = pytest.mark.skip(
-        reason=f"QY2 (cap-22) WMMA tests require a capability-22 device; got {_CAP_CODE}"
-    )
+    skip_marker = pytest.mark.skip(reason=f"QY2 (cap-22) WMMA tests require a capability-22 device; got {_CAP_CODE}")
     for item in items:
         if str(item.fspath).startswith(_HERE):
             item.add_marker(skip_marker)

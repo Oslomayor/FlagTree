@@ -134,7 +134,7 @@ BLOCK_WARP_CONFIG = [
     (64, 32, 16, 2),
     (32, 64, 16, 2),
     (64, 32, 32, 2),
-    (128, 16, 16, 2), # from real case of M1000
+    (128, 16, 16, 2),  # from real case of M1000
     (64, 64, 16, 4),
     (64, 64, 32, 4),
     (64, 64, 64, 4),
@@ -144,11 +144,9 @@ BLOCK_WARP_CONFIG = [
     (128, 64, 64, 8),
 ]
 
-CONFIG = [
-    (M, N, K, block_m, block_n, block_k, num_warps)
-    for M, N, K in MNK
-    for block_m, block_n, block_k, num_warps in BLOCK_WARP_CONFIG
-]
+CONFIG = [(M, N, K, block_m, block_n, block_k, num_warps)
+          for M, N, K in MNK
+          for block_m, block_n, block_k, num_warps in BLOCK_WARP_CONFIG]
 EXTRA_CONFIG = [
     # Basic cases with 1 warp and 1 MMA
     (32, 32, 16, 32, 32, 16, 1),

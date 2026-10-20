@@ -800,8 +800,8 @@ planSharedMemorySqmmaOperand(Value v, bool allowTranspose) {
 
   SmallVector<unsigned> newOrder = ttg::getOrderForMemory(argType);
   bool preserveRank2SourceOrder =
-      rank == 2 && (argType.getElementType().isF16() ||
-                    argType.getElementType().isBF16());
+      rank == 2 &&
+      (argType.getElementType().isF16() || argType.getElementType().isBF16());
   if (!allowTranspose && !preserveRank2SourceOrder) {
     newOrder.clear();
     for (int dim = static_cast<int>(rank) - 1; dim >= 0; --dim)
@@ -1677,9 +1677,10 @@ public:
         problem->matrixShape.m, problem->matrixShape.n, problem->matrixShape.k,
         problem->numWarps, aElemTy, allowTF32, wmmaTraits);
     if (config &&
-        !validateWmmaConfig(*problem,
-                            SelectedConfig{config->instrShape, config->warpsPerCTA},
-                            wmmaTraits).succeeded())
+        !validateWmmaConfig(
+             *problem, SelectedConfig{config->instrShape, config->warpsPerCTA},
+             wmmaTraits)
+             .succeeded())
       return failure();
 #else
     auto aTy = cast<RankedTensorType>(dotOp.getA().getType());
