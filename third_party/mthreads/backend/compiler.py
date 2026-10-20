@@ -1066,6 +1066,8 @@ class MUSABackend(BaseBackend):
             passes.ttgpuir.add_schedule_loops(pm)
             mthreads.passes.ttgpuir.add_pipeline(pm, opt.num_stages, dump_enabled)
         else:
+            passes.ttgpuir.add_fuse_nested_loops(pm)
+            passes.common.add_canonicalizer(pm)
             passes.ttir.add_triton_licm(pm)
 
         passes.common.add_canonicalizer(pm)

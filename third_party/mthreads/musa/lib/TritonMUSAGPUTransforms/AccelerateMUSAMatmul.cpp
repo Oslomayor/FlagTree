@@ -907,6 +907,22 @@ static Value promoteDotOperand(OpBuilder &builder, Location loc, Value operand,
   if (tt::type::isFloat8(srcElemTy))
     return tt::FpToFpOp::create(builder, loc, dstTy, operand);
 
+  // The MTGPU QY2 backend does not have a selectable scalar/vector BF16
+  // fpext pattern in every generic-dot shape.  Preserve the exact BF16 value
+  // by widening its bit representation and constructing the corresponding
+  // F32 exponent/mantissa bits.  This is equivalent to fpext, but lowers to
+  // integer zext/shl/bitcast operations that llc can select reliably.
+  if (srcElemTy.isBF16() && promoteElemTy.isF32()) {
+    auto i16Ty = tensorTy.clone(builder.getI16Type());
+    auto i32Ty = tensorTy.clone(builder.getI32Type());
+    Value bits = tt::BitcastOp::create(builder, loc, i16Ty, operand);
+    Value widened = arith::ExtUIOp::create(builder, loc, i32Ty, bits);
+    Value shiftValue = arith::ConstantIntOp::create(builder, loc, 16, 32);
+    Value shift = tt::SplatOp::create(builder, loc, i32Ty, shiftValue);
+    Value shifted = arith::ShLIOp::create(builder, loc, i32Ty, widened, shift);
+    return tt::BitcastOp::create(builder, loc, dstTy, shifted);
+  }
+
   if (isa<FloatType>(srcElemTy) && isa<FloatType>(promoteElemTy))
     return arith::ExtFOp::create(builder, loc, dstTy, operand);
   return operand;
@@ -949,7 +965,7 @@ static void promoteResidualDotForFma(ModuleOp mod) {
 
     if (!isLowPrecisionFloatingForFma(aElemTy) ||
         !isLowPrecisionFloatingForFma(bElemTy) ||
-        !isLowPrecisionFloatingForFma(dElemTy))
+        (!isLowPrecisionFloatingForFma(dElemTy) && !dElemTy.isF32()))
       continue;
 
     Type carrierElemTy = builder.getF32Type();
@@ -960,6 +976,11 @@ static void promoteResidualDotForFma(ModuleOp mod) {
     auto newDot = tt::DotOp::create(builder, loc, carrierTy, newA, newB, newC,
                                     dotOp.getInputPrecision(),
                                     dotOp.getMaxNumImpreciseAcc());
+    if (dElemTy.isF32()) {
+      dotOp.replaceAllUsesWith(newDot.getResult());
+      dotOp.erase();
+      continue;
+    }
     Value truncated =
         arith::TruncFOp::create(builder, loc, dTy, newDot.getResult());
     dotOp.replaceAllUsesWith(truncated);

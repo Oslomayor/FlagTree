@@ -121,22 +121,29 @@ Value TargetInfo::loadDShared(RewriterBase &rewriter, Location loc, Value ptr,
 
 Value TargetInfo::shuffleXor(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
-  return LLVM::MUSA::shuffleXor(loc, rewriter, val, i, 32);
+  // QY2 executes a logical warp with 128 lanes.  Passing the legacy 32-lane
+  // width causes absolute-index shuffles used by layout conversion to wrap
+  // at 32/64-lane boundaries and corrupt widening casts and reductions.
+  return LLVM::MUSA::shuffleXor(loc, rewriter, val, i,
+                                computeCapability < 30 ? 128 : 32);
 }
 
 Value TargetInfo::shuffleUp(RewriterBase &rewriter, Location loc, Value val,
                             int i) const {
-  return LLVM::MUSA::shuffleUp(loc, rewriter, val, i, 32);
+  return LLVM::MUSA::shuffleUp(loc, rewriter, val, i,
+                               computeCapability < 30 ? 128 : 32);
 }
 
 Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                              int i) const {
-  return LLVM::MUSA::shuffleIdx(loc, rewriter, val, i, 32);
+  return LLVM::MUSA::shuffleIdx(loc, rewriter, val, i,
+                                computeCapability < 30 ? 128 : 32);
 }
 
 Value TargetInfo::shuffleIdx(RewriterBase &rewriter, Location loc, Value val,
                              Value i) const {
-  return LLVM::MUSA::shuffleIdx(loc, rewriter, val, i, 32);
+  return LLVM::MUSA::shuffleIdx(loc, rewriter, val, i,
+                                computeCapability < 30 ? 128 : 32);
 }
 
 Value TargetInfo::permute(RewriterBase &rewriter, Location loc, Value a,

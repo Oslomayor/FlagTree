@@ -38,6 +38,7 @@ from triton._internal_testing import (
     is_hip_gfx1250,
     is_musa,
     is_musa_ph1,
+    is_musa_qy,
     is_xpu,
     get_arch,
     torch_float8_dtypes,
@@ -1050,6 +1051,8 @@ def test_abs_fp8(in_dtype, device):
     elif is_musa():
         if in_dtype == tl.float8e4b15 and is_musa_ph1():
             pytest.skip("float8e4nv not supported on PH arch")
+        if is_musa_qy():
+            pytest.skip("test_abs_fp8 not supported on QY arch")
 
     @triton.jit
     def abs_kernel(X, Z, SIZE: tl.constexpr):
@@ -4130,7 +4133,6 @@ def test_masked_load_scalar(num_ctas, mask_val, other_val, device):
 @pytest.mark.interpreter
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
 def test_masked_load_shared_memory(dtype, device):
-
     check_type_supported(dtype, device)  # bfloat16 on cc < 80 will not be tested
 
     M = 32
@@ -5957,7 +5959,6 @@ def test_tl_range_num_stages(device):
 
 
 def test_tl_range_fuse(device):
-
     @triton.jit
     def kernel(ub, out_ptr):
         k = 1
@@ -5982,7 +5983,6 @@ def test_tl_range_fuse(device):
 
 
 def test_tl_range_fuse_dependent(device):
-
     @triton.jit
     def kernel(ub, out_i_ptr, out_j_ptr):
         k = 0
@@ -6636,7 +6636,6 @@ def test_tensor_member(device):
 @pytest.mark.parametrize("trans_a", [False, True])
 @pytest.mark.parametrize("trans_b", [False, True])
 def test_dot_multidim(rank, trans_a, trans_b, device):
-
     if is_interpreter():
         pytest.skip("bfloat16 is not supported in the interpreter")
 
