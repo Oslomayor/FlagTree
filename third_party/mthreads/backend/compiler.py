@@ -214,7 +214,6 @@ def get_musa_version() -> str:
         return "unknown"
 
 
-@functools.lru_cache(None)
 def file_hash(path: str) -> str:
     with open(path, "rb") as f:
         return hashlib.sha256(f.read()).hexdigest()
@@ -764,6 +763,8 @@ class MUSAOptions:
         extern_libs = {} if self.extern_libs is None else dict(self.extern_libs)
         if not extern_libs.get("libdevice", None):
             extern_libs["libdevice"] = knobs.musa.libdevice_path or str(default_libdir / "libdevice.31.bc")
+        if self.arch == "mp_31" and not extern_libs.get("printf", None):
+            extern_libs["printf"] = knobs.musa.libprintf_path or str(default_libdir / "libprintf.bc")
         object.__setattr__(self, "extern_libs", tuple(extern_libs.items()))
         assert self.num_warps > 0 and (self.num_warps & (self.num_warps - 1)) == 0, \
             "num_warps must be a power of 2"
@@ -1156,8 +1157,12 @@ class MUSABackend(BaseBackend):
         mthreads.attach_datalayout(llvm_mod)
 
         if options.extern_libs:
-            paths = [path for (name, path) in options.extern_libs]
-            llvm.link_extern_libs(llvm_mod, paths)
+            inline_paths = [path for (name, path) in options.extern_libs if name != "printf"]
+            printf_paths = [path for (name, path) in options.extern_libs if name == "printf"]
+            if inline_paths:
+                llvm.link_extern_libs(llvm_mod, inline_paths)
+            if printf_paths:
+                llvm.link_extern_libs(llvm_mod, printf_paths, force_inline=False)
 
         MUSABackend._optimize_llir_module(llvm_mod, metadata, capability)
         maxntidx = max(1, int(launch_num_warps) * int(options.warp_size))
